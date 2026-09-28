@@ -97,12 +97,16 @@ impl LookBehavior {
                     let smooth_look_ticks = settings().smooth_look_ticks;
                     self.smooth_yaw_buffer.push_back(target.rotation.get_yaw());
                     while self.smooth_yaw_buffer.len() as i64 > smooth_look_ticks as i64 {
-                        self.smooth_yaw_buffer.pop_front();
+                        self.smooth_yaw_buffer
+                            .pop_front()
+                            .expect("NoSuchElementException");
                     }
                     self.smooth_pitch_buffer
                         .push_back(target.rotation.get_pitch());
                     while self.smooth_pitch_buffer.len() as i64 > smooth_look_ticks as i64 {
-                        self.smooth_pitch_buffer.pop_front();
+                        self.smooth_pitch_buffer
+                            .pop_front()
+                            .expect("NoSuchElementException");
                     }
                     let fall_flying = ctx.player().fall_flying;
                     if target.mode == Mode::Server {
