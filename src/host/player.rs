@@ -251,7 +251,9 @@ pub struct Player {
     /// last level it finds. 0 without.
     pub frost_walker: i32,
     /// The `WATER_MOVEMENT_EFFICIENCY` attribute effect of the first enchantment on the
-    /// equipment that has one, at its level (Depth Strider: `level / 3`). `None` without.
+    /// equipment that has one, at its level. Depth Strider's is `LevelBasedValue.Linear` in the
+    /// vanilla data: `0.33333334f + 0.33333334f * (level - 1)` in `float`, which equals
+    /// `level / 3f` up to level 4 but not above. `None` without.
     pub water_movement_efficiency: Option<f32>,
 }
 

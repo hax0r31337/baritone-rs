@@ -60,7 +60,8 @@ pub struct DimensionType {
     pub min_y: i32,
     /// `height()`: number of block layers.
     pub height: i32,
-    /// Placed water evaporates (upstream checks for the Nether).
+    /// Placed water evaporates. Upstream checks the dimension key (`dimension() != Level.NETHER`),
+    /// not the dimension type's `ultrawarm`: set this exactly in `minecraft:the_nether`.
     pub water_evaporates: bool,
 }
 
