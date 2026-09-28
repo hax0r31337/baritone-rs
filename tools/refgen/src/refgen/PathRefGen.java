@@ -16,6 +16,7 @@ import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.PathCalculationResult;
 import baritone.pathing.calc.AStarPathFinder;
+import baritone.pathing.calc.AbstractNodeCostSearch;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.MovementHelper;
 import baritone.pathing.movement.Moves;
@@ -40,7 +41,15 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.TagKey;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
+import net.minecraft.world.item.enchantment.effects.EnchantmentAttributeEffect;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
@@ -60,6 +69,7 @@ import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.DoublePlantBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.LadderBlock;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.StairBlock;
@@ -116,8 +126,16 @@ final class PathRefGen {
 
     private static final Random R = new Random(0x3c6ef372L);
 
-    static final int MIN_Y = -32;
-    static final int HEIGHT = 96;
+    /**
+     * A world's dimension: its min Y and height, and whether it is the Nether (by dimension key,
+     * which is what upstream checks).
+     */
+    record Shape(int minY, int height, boolean nether) {}
+
+    static final Shape OVERWORLD = new Shape(-32, 96, false);
+    /** Low and shallow, so the build limit is close to the surface. */
+    static final Shape NETHER = new Shape(0, 64, true);
+
     /** Loaded chunks are CHUNK_MIN..CHUNK_MAX on both axes. */
     static final int CHUNK_MIN = -2;
     static final int CHUNK_MAX = 1;
@@ -125,6 +143,9 @@ final class PathRefGen {
     static final int Z0 = CHUNK_MIN * 16;
     static final int SX = (CHUNK_MAX - CHUNK_MIN + 1) * 16;
     static final int SZ = SX;
+
+    /** Targeted queries per world after the random ones (see {@link #queries}). */
+    static final int EDGE_QUERIES = 8;
 
     /** Large enough that no calculation times out, so results do not depend on speed. */
     static final long TIMEOUT = 600_000L;
@@ -142,8 +163,6 @@ final class PathRefGen {
         JsonObject root = new JsonObject();
         root.addProperty("upstream", upstream);
         root.addProperty("minecraft", minecraft);
-        root.addProperty("min_y", MIN_Y);
-        root.addProperty("height", HEIGHT);
         root.add("chunk_range", row(CHUNK_MIN, CHUNK_MAX));
         root.addProperty("timeout", TIMEOUT);
         root.add("configs", configs);
@@ -222,7 +241,106 @@ final class PathRefGen {
         d.addProperty("allowPlace", false);
         d.addProperty("backtrackCostFavoringCoefficient", 2.0);
         configs.add("d", d);
+
+        // ladders and vines are no longer walked through, so one above the player is a block to
+        // break, which MovementPillar then skips because it climbs it
+        JsonObject e = new JsonObject();
+        e.add("blocksToAvoid", BlockRefGen.names(Blocks.LADDER, Blocks.VINE));
+        configs.add("e", e);
+
+        // slowPath, without the delay; the second also makes its timeouts fire at once
+        JsonObject slow = new JsonObject();
+        slow.addProperty("slowPath", true);
+        slow.addProperty("slowPathTimeDelayMS", 0L);
+        slow.addProperty("slowPathTimeoutMS", TIMEOUT);
+        configs.add(SLOW_CONFIG, slow);
+        JsonObject slowTimeout = slow.deepCopy();
+        slowTimeout.addProperty("slowPathTimeoutMS", 0L);
+        configs.add(SLOW_TIMEOUT_CONFIG, slowTimeout);
+
+        // random mixes, so that settings also meet in combinations the bundles above never make
+        for (int i = 0; i < RANDOM_CONFIGS; i++) {
+            configs.add("r" + i, randomConfig());
+        }
         return configs;
+    }
+
+    static final int RANDOM_CONFIGS = 8;
+
+    /** A config with cutoffAtLoadBoundary on. */
+    static final String LOAD_BOUNDARY_CONFIG = "d";
+    /** A config with assumeWalkOnWater on. */
+    static final String WALK_ON_WATER_CONFIG = "c";
+    /** A config that avoids ladders and vines. */
+    static final String AVOID_CLIMBABLE_CONFIG = "e";
+    /** Only for the queries that use them, not picked at random. */
+    static final String SLOW_CONFIG = "slow";
+    static final String SLOW_TIMEOUT_CONFIG = "slow_timeout";
+
+    private static final String[] RANDOM_BOOLEANS = {
+            "allowBreak", "allowPlace", "allowSprint", "allowParkour", "allowParkourPlace", "allowParkourAscend",
+            "allowDiagonalDescend", "allowDiagonalAscend", "allowDownward", "allowWalkOnBottomSlab",
+            "allowWalkOnMagmaBlocks", "allowVines", "assumeWalkOnWater", "assumeWalkOnLava", "allowWaterBucketFall",
+            "allowJumpAtBuildLimit", "allowPlaceInFluidsSource", "allowPlaceInFluidsFlow", "strictLiquidCheck",
+            "avoidUpdatingFallingBlocks", "considerPotionEffects", "autoTool", "useSwordToMine", "itemSaver",
+            "cutoffAtLoadBoundary", "minimumImprovementRepropagation",
+    };
+
+    /** Setting → values to pick from (exact in both Java's and Rust's number parsing). */
+    private static final Map<String, Number[]> RANDOM_NUMBERS = new LinkedHashMap<>();
+
+    static {
+        RANDOM_NUMBERS.put("maxFallHeightNoWater", new Number[]{2, 3, 4, 6, 10});
+        RANDOM_NUMBERS.put("maxFallHeightBucket", new Number[]{5, 12, 20, 40});
+        RANDOM_NUMBERS.put("jumpPenalty", new Number[]{0.0, 1.25, 2.0, 5.0});
+        RANDOM_NUMBERS.put("blockPlacementPenalty", new Number[]{0.0, 4.5, 20.0, 50.0});
+        RANDOM_NUMBERS.put("walkOnWaterOnePenalty", new Number[]{0.0, 0.75, 3.0});
+        RANDOM_NUMBERS.put("blockBreakAdditionalPenalty", new Number[]{0.0, 0.5, 2.0, 8.0});
+        RANDOM_NUMBERS.put("backtrackCostFavoringCoefficient", new Number[]{0.25, 0.5, 1.0, 2.0});
+        RANDOM_NUMBERS.put("pathCutoffMinimumLength", new Number[]{4, 8, 30});
+        RANDOM_NUMBERS.put("pathCutoffFactor", new Number[]{0.5, 0.75, 0.9});
+        RANDOM_NUMBERS.put("avoidBreakingMultiplier", new Number[]{0.5, 3.0, 10.0});
+        RANDOM_NUMBERS.put("itemSaverThreshold", new Number[]{5, 20, 500});
+        RANDOM_NUMBERS.put("costHeuristic", new Number[]{2.5, 3.563, 4.0, 5.0});
+        RANDOM_NUMBERS.put("pathingMaxChunkBorderFetch", new Number[]{5, 50, 200});
+    }
+
+    private static final String[] RANDOM_LISTS = {"blocksToAvoid", "blocksToDisallowBreaking", "blocksToAvoidBreaking", "allowBreakAnyway"};
+
+    private static final Block[] RANDOM_LIST_BLOCKS = {
+            Blocks.STONE, Blocks.DIRT, Blocks.GRASS_BLOCK, Blocks.OAK_LOG, Blocks.OAK_LEAVES, Blocks.GLASS, Blocks.SAND,
+            Blocks.GRAVEL, Blocks.COBBLESTONE, Blocks.NETHERRACK, Blocks.SOUL_SAND, Blocks.TORCH, Blocks.COBWEB,
+            Blocks.OAK_DOOR, Blocks.WATER, Blocks.LADDER, Blocks.OAK_SLAB,
+    };
+
+    /**
+     * Each setting is left at its default or set to a random value, independently.
+     */
+    private static JsonObject randomConfig() {
+        JsonObject c = new JsonObject();
+        for (String key : RANDOM_BOOLEANS) {
+            if (R.nextBoolean()) {
+                c.addProperty(key, R.nextBoolean());
+            }
+        }
+        for (Map.Entry<String, Number[]> e : RANDOM_NUMBERS.entrySet()) {
+            if (R.nextInt(3) == 0) {
+                c.addProperty(e.getKey(), e.getValue()[R.nextInt(e.getValue().length)]);
+            }
+        }
+        for (String key : RANDOM_LISTS) {
+            if (R.nextInt(3) == 0) {
+                List<Block> blocks = new ArrayList<>();
+                for (int i = 1 + R.nextInt(4); i > 0; i--) {
+                    Block b = RANDOM_LIST_BLOCKS[R.nextInt(RANDOM_LIST_BLOCKS.length)];
+                    if (!blocks.contains(b)) {
+                        blocks.add(b);
+                    }
+                }
+                c.add(key, BlockRefGen.names(blocks.toArray(new Block[0])));
+            }
+        }
+        return c;
     }
 
     // endregion
@@ -299,7 +417,26 @@ final class PathRefGen {
         worn.items[5] = damaged(Items.DIAMOND_AXE, 1000);
         worn.items[7] = stack(Items.COPPER_PICKAXE, 1);
         m.put("worn", worn);
+
+        // equal speeds with and without Silk Touch (the tie break), Efficiency on tools, shears
+        // and a sword, and enchantments that do nothing for mining
+        Inventory0 enchanted = inventory(0);
+        enchanted.items[0] = stack(Items.IRON_PICKAXE, 1);
+        enchanted.items[1] = enchant(stack(Items.IRON_PICKAXE, 1), Enchantments.SILK_TOUCH, 1);
+        enchanted.items[2] = enchant(stack(Items.DIAMOND_SHOVEL, 1), Enchantments.EFFICIENCY, 3);
+        enchanted.items[3] = enchant(enchant(stack(Items.STONE_AXE, 1), Enchantments.EFFICIENCY, 5), Enchantments.SILK_TOUCH, 1);
+        enchanted.items[4] = enchant(stack(Items.SHEARS, 1), Enchantments.EFFICIENCY, 2);
+        enchanted.items[5] = enchant(stack(Items.GOLDEN_PICKAXE, 1), Enchantments.UNBREAKING, 3);
+        enchanted.items[6] = enchant(stack(Items.WOODEN_SWORD, 1), Enchantments.EFFICIENCY, 4);
+        enchanted.items[7] = enchant(enchant(damaged(Items.DIAMOND_PICKAXE, 10), Enchantments.SILK_TOUCH, 1), Enchantments.EFFICIENCY, 1);
+        enchanted.items[8] = enchant(stack(Items.STICK, 1), Enchantments.SILK_TOUCH, 1);
+        m.put("enchanted", enchanted);
         return m;
+    }
+
+    private static ItemStack enchant(ItemStack s, ResourceKey<Enchantment> key, int level) {
+        s.enchant(BlockRefGen.LOOKUP.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(key), level);
+        return s;
     }
 
     private static Inventory0 inventory(int selected) {
@@ -336,6 +473,22 @@ final class PathRefGen {
             t.add("rules", rules);
             t.addProperty("default_mining_speed", tool.defaultMiningSpeed());
             o.add("tool", t);
+        }
+        // what the host evaluates from the enchantments, as ToolSet does
+        ItemEnchantments enchantments = s.getEnchantments();
+        OUTER:
+        for (Holder<Enchantment> enchant : enchantments.keySet()) {
+            for (EnchantmentAttributeEffect e : enchant.value().getEffects(EnchantmentEffectComponents.ATTRIBUTES)) {
+                if (e.attribute().is(Attributes.MINING_EFFICIENCY.unwrapKey().get())) {
+                    o.addProperty("mining_efficiency", e.amount().calculate(enchantments.getLevel(enchant)));
+                    break OUTER;
+                }
+            }
+        }
+        for (Holder<Enchantment> enchant : enchantments.keySet()) {
+            if (enchant.is(Enchantments.SILK_TOUCH) && enchantments.getLevel(enchant) > 0) {
+                o.addProperty("silk_touch", true);
+            }
         }
         List<String> tags = new ArrayList<>();
         s.typeHolder().tags().forEach(tag -> tags.add(tag.location().toString()));
@@ -446,12 +599,13 @@ final class PathRefGen {
                 });
     }
 
-    static ClientLevel fakeLevel(WorldBorder border) throws Exception {
+    static ClientLevel fakeLevel(GenWorld world) throws Exception {
         ClientLevel level = BlockRefGen.allocate(ClientLevel.class);
-        DimensionType type = new DimensionType(false, true, false, false, 1.0, MIN_Y, HEIGHT, HEIGHT,
+        DimensionType type = new DimensionType(false, true, false, false, 1.0, world.minY, world.height, world.height,
                 null, 0f, null, null, null, null, null, Optional.empty());
         BlockRefGen.setField(Level.class, level, "dimensionTypeRegistration", Holder.direct(type));
-        BlockRefGen.setField(ClientLevel.class, level, "worldBorder", border);
+        BlockRefGen.setField(Level.class, level, "dimension", world.nether ? Level.NETHER : Level.OVERWORLD);
+        BlockRefGen.setField(ClientLevel.class, level, "worldBorder", world.border);
         return level;
     }
 
@@ -487,7 +641,7 @@ final class PathRefGen {
 
         @Override
         public BlockState get0(int x, int y, int z) {
-            if (y < MIN_Y || y >= MIN_Y + HEIGHT) {
+            if (y < world.minY || y >= world.minY + world.height) {
                 return AIR;
             }
             if (!worldContainsLoadedChunk(x, z)) {
@@ -568,7 +722,8 @@ final class PathRefGen {
         List<Block> blocks = new ArrayList<>();
         BuiltInRegistries.BLOCK.forEach(blocks::add);
         JsonArray out = new JsonArray();
-        for (String config : new String[]{"a", "d"}) {
+        // c turns considerPotionEffects off, d changes the tool settings
+        for (String config : new String[]{"a", "c", "d"}) {
             for (Map.Entry<String, Inventory0> inv : inventories.entrySet()) {
                 for (int e = 0; e < 2; e++) {
                     BlockRefGen.apply(configs.getAsJsonObject(config));
@@ -603,12 +758,24 @@ final class PathRefGen {
      */
     static final class GenWorld {
         final String kind;
-        final BlockState[] blocks = new BlockState[SX * SZ * HEIGHT];
+        final int minY;
+        final int height;
+        final boolean nether;
+        final BlockState[] blocks;
         final Set<Long> loaded = new HashSet<>();
         WorldBorder border = new WorldBorder();
+        /**
+         * Positions next to features that random samples rarely hit (ledges above pools, the
+         * inside of ladder and vine columns), where the extra move samples go.
+         */
+        final List<BetterBlockPos> hotspots = new ArrayList<>();
 
-        GenWorld(String kind) {
+        GenWorld(String kind, Shape shape) {
             this.kind = kind;
+            this.minY = shape.minY;
+            this.height = shape.height;
+            this.nether = shape.nether;
+            this.blocks = new BlockState[SX * SZ * height];
             java.util.Arrays.fill(blocks, AIR);
             for (int cx = CHUNK_MIN; cx <= CHUNK_MAX; cx++) {
                 for (int cz = CHUNK_MIN; cz <= CHUNK_MAX; cz++) {
@@ -617,20 +784,24 @@ final class PathRefGen {
             }
         }
 
-        static boolean inside(int x, int y, int z) {
-            return x >= X0 && x < X0 + SX && z >= Z0 && z < Z0 + SZ && y >= MIN_Y && y < MIN_Y + HEIGHT;
+        int maxY() {
+            return minY + height - 1;
+        }
+
+        boolean inside(int x, int y, int z) {
+            return x >= X0 && x < X0 + SX && z >= Z0 && z < Z0 + SZ && y >= minY && y < minY + height;
         }
 
         BlockState get(int x, int y, int z) {
             if (!inside(x, y, z)) {
                 return AIR;
             }
-            return blocks[((x - X0) * SZ + (z - Z0)) * HEIGHT + (y - MIN_Y)];
+            return blocks[((x - X0) * SZ + (z - Z0)) * height + (y - minY)];
         }
 
         void set(int x, int y, int z, BlockState state) {
             if (inside(x, y, z)) {
-                blocks[((x - X0) * SZ + (z - Z0)) * HEIGHT + (y - MIN_Y)] = state;
+                blocks[((x - X0) * SZ + (z - Z0)) * height + (y - minY)] = state;
             }
         }
 
@@ -638,12 +809,16 @@ final class PathRefGen {
          * First y from the top where the block below is not air-like (the surface to stand on).
          */
         int surface(int x, int z) {
-            for (int y = MIN_Y + HEIGHT - 1; y > MIN_Y; y--) {
+            for (int y = maxY(); y > minY; y--) {
                 if (!get(x, y - 1, z).isAir()) {
                     return y;
                 }
             }
-            return MIN_Y;
+            return minY;
+        }
+
+        boolean hasHole() {
+            return loaded.size() < (CHUNK_MAX - CHUNK_MIN + 1) * (CHUNK_MAX - CHUNK_MIN + 1);
         }
 
         /**
@@ -667,6 +842,8 @@ final class PathRefGen {
 
     private static JsonArray worlds(JsonObject configs, Map<String, Inventory0> inventories) throws Exception {
         List<String> configNames = new ArrayList<>(configs.keySet());
+        configNames.remove(SLOW_CONFIG);
+        configNames.remove(SLOW_TIMEOUT_CONFIG);
         List<String> inventoryNames = new ArrayList<>(inventories.keySet());
         List<BlockState> allStates = new ArrayList<>();
         Block.BLOCK_STATE_REGISTRY.forEach(allStates::add);
@@ -674,13 +851,16 @@ final class PathRefGen {
 
         List<GenWorld> worlds = new ArrayList<>();
         for (int i = 0; i < 14; i++) {
-            worlds.add(terrain(allStates));
+            worlds.add(terrain(allStates, OVERWORLD));
         }
         for (int i = 0; i < 4; i++) {
             worlds.add(noise(allStates));
         }
         worlds.add(flat());
         worlds.add(flat());
+        for (int i = 0; i < 4; i++) {
+            worlds.add(terrain(allStates, NETHER));
+        }
 
         JsonArray out = new JsonArray();
         PrintStream stdout = System.out;
@@ -696,11 +876,14 @@ final class PathRefGen {
                 world.border.setCenter(R.nextInt(17) - 8 + R.nextDouble(), R.nextInt(17) - 8 + R.nextDouble());
                 world.border.setSize(24 + R.nextInt(40) + R.nextDouble());
             }
-            ClientLevel level = fakeLevel(world.border);
+            ClientLevel level = fakeLevel(world);
             ArrayBsi bsi = ArrayBsi.create(world);
 
             JsonObject w = new JsonObject();
             w.addProperty("kind", world.kind);
+            w.addProperty("min_y", world.minY);
+            w.addProperty("height", world.height);
+            w.addProperty("nether", world.nether);
             w.add("blocks", world.rle());
             JsonArray loaded = new JsonArray();
             for (int cx = CHUNK_MIN; cx <= CHUNK_MAX; cx++) {
@@ -737,7 +920,7 @@ final class PathRefGen {
                 continue;
             }
             List<Integer> ys = new ArrayList<>();
-            for (int y = MIN_Y + 1; y < MIN_Y + HEIGHT - 1; y++) {
+            for (int y = world.minY + 1; y < world.maxY(); y++) {
                 if (MovementHelper.canWalkOn(bsi, x, y - 1, z)
                         && MovementHelper.canWalkThrough(bsi, x, y, z)
                         && MovementHelper.canWalkThrough(bsi, x, y + 1, z)) {
@@ -750,7 +933,11 @@ final class PathRefGen {
                 return new BetterBlockPos(x, y, z);
             }
         }
-        return new BetterBlockPos(X0 + R.nextInt(SX), R.nextInt(20), Z0 + R.nextInt(SZ));
+        return new BetterBlockPos(X0 + R.nextInt(SX), world.minY + 32 + R.nextInt(20), Z0 + R.nextInt(SZ));
+    }
+
+    private static BetterBlockPos anywhere(GenWorld world) {
+        return new BetterBlockPos(X0 + R.nextInt(SX), world.minY + R.nextInt(world.height), Z0 + R.nextInt(SZ));
     }
 
     private static GoalCase randomGoal(GenWorld world, ArrayBsi bsi, BetterBlockPos start) {
@@ -761,7 +948,7 @@ final class PathRefGen {
         } else if (r < 40) {
             return RefGen.xz(X0 - 8 + R.nextInt(SX + 16), Z0 - 8 + R.nextInt(SZ + 16));
         } else if (r < 47) {
-            return RefGen.yLevel(MIN_Y + 4 + R.nextInt(50));
+            return RefGen.yLevel(world.minY + 4 + R.nextInt(world.height - 8));
         } else if (r < 56) {
             BetterBlockPos p = standable(world, bsi);
             int range = R.nextInt(5);
@@ -796,21 +983,51 @@ final class PathRefGen {
                                          Map<String, Inventory0> inventories, List<String> configNames, List<String> inventoryNames)
             throws Exception {
         JsonArray out = new JsonArray();
-        for (int k = 0; k < 2; k++) {
-            String config = configNames.get(R.nextInt(configNames.size()));
+        // 0, 1: random positions. 2: random positions, and the settings change after the context
+        // is built (upstream reads some of them from the context and some live). At the hotspots:
+        // 3: assumeWalkOnWater only in the context, 4: WalkOffCalculationContext's fields,
+        // 5: ladders and vines avoided.
+        for (int k = 0; k < 6; k++) {
+            boolean atHotspots = k >= 3;
+            if (atHotspots && world.hotspots.isEmpty()) {
+                break;
+            }
+            String config = switch (k) {
+                case 3 -> WALK_ON_WATER_CONFIG;
+                case 5 -> AVOID_CLIMBABLE_CONFIG;
+                default -> configNames.get(R.nextInt(configNames.size()));
+            };
+            String liveConfig = switch (k) {
+                case 2 -> configNames.get(R.nextInt(configNames.size()));
+                case 3 -> "a";
+                default -> null;
+            };
+            boolean walkOff = k == 4;
             BlockRefGen.apply(configs.getAsJsonObject(config));
             PlayerSpec player = randomPlayer(inventoryNames);
             CalculationContext context = context(baritone, level, bsi, inventories.get(player.inventory), player);
+            if (walkOff) {
+                // the fields ElytraProcess.WalkOffCalculationContext sets (not its overrides)
+                context.allowFallIntoLava = true;
+                context.minFallHeight = 8;
+                context.maxFallHeightNoWater = 10000;
+            }
+            if (liveConfig != null) {
+                BlockRefGen.apply(configs.getAsJsonObject(liveConfig));
+            }
             JsonObject o = new JsonObject();
             o.addProperty("config", config);
+            if (liveConfig != null) {
+                o.addProperty("live_config", liveConfig);
+            }
+            o.addProperty("walk_off", walkOff);
             o.add("player", player.json());
             // [x, y, z, [move ordinal, x, y, z, cost bits]... for each finite cost]
             JsonArray positions = new JsonArray();
             MutableMoveResult res = new MutableMoveResult();
-            for (int i = 0; i < 150; i++) {
-                BetterBlockPos p = i % 3 == 0
-                        ? new BetterBlockPos(X0 + R.nextInt(SX), MIN_Y + R.nextInt(HEIGHT), Z0 + R.nextInt(SZ))
-                        : standable(world, bsi);
+            int count = atHotspots ? world.hotspots.size() : 150;
+            for (int i = 0; i < count; i++) {
+                BetterBlockPos p = atHotspots ? world.hotspots.get(i) : i % 3 == 0 ? anywhere(world) : standable(world, bsi);
                 JsonArray results = new JsonArray();
                 for (Moves moves : Moves.values()) {
                     res.reset();
@@ -833,15 +1050,58 @@ final class PathRefGen {
         JsonArray out = new JsonArray();
         List<BetterBlockPos> previous = null;
         int count = world.kind.equals("noise") ? 8 : 12;
-        for (int q = 0; q < count; q++) {
+        for (int q = 0; q < count + EDGE_QUERIES; q++) {
             String config = configNames.get(R.nextInt(configNames.size()));
+            BetterBlockPos start;
+            BetterBlockPos realStart;
+            GoalCase goal;
+            long primaryTimeout = TIMEOUT;
+            long failureTimeout = TIMEOUT;
+            int cancelAfter = 0;
+            if (q < count) {
+                start = R.nextInt(8) == 0 ? anywhere(world) : standable(world, bsi);
+                realStart = R.nextInt(8) == 0 ? start.relative(Direction.from3DDataValue(R.nextInt(6))) : start;
+                goal = randomGoal(world, bsi, start);
+            } else if (q - count >= 3) {
+                // Ending the search early, in ways that do not depend on speed. A timeout of 0
+                // expires at the first check (every 64 nodes); the primary one only once the
+                // search is no longer failing.
+                start = standable(world, bsi);
+                realStart = start;
+                goal = randomGoal(world, bsi, start);
+                switch (q - count) {
+                    // cancelled from inside the search, by the goal (see CancellingGoal)
+                    case 3 -> cancelAfter = 1 + R.nextInt(500);
+                    case 4 -> primaryTimeout = 0;
+                    case 5 -> failureTimeout = 0;
+                    // slowPath (without the delay): its timeouts replace the given ones
+                    case 6 -> config = SLOW_CONFIG;
+                    default -> config = SLOW_TIMEOUT_CONFIG;
+                }
+            } else {
+                // Edge cases of Path and PathBase that random queries rarely reach. All start in
+                // the goal, so the path is the start alone (plus the fake node for realStart).
+                start = standable(world, bsi);
+                switch (q - count) {
+                    // the fake node: realStart next to the start, the movement from it is found
+                    case 0 -> realStart = start.relative(Direction.from3DDataValue(R.nextInt(6)));
+                    // the fake node too far for any movement: "Movement became impossible"
+                    case 1 -> realStart = start.relative(horizontal(), 3 + R.nextInt(3));
+                    // starting in an unloaded chunk: cutoffAtLoadedChunks cuts at the start
+                    default -> {
+                        if (world.hasHole()) {
+                            config = LOAD_BOUNDARY_CONFIG;
+                            do {
+                                start = anywhere(world);
+                            } while (bsi.worldContainsLoadedChunk(start.x, start.z));
+                        }
+                        realStart = R.nextBoolean() ? start : start.relative(Direction.from3DDataValue(R.nextInt(6)));
+                    }
+                }
+                goal = R.nextBoolean() ? RefGen.block(start.x, start.y, start.z) : RefGen.yLevel(start.y);
+            }
             BlockRefGen.apply(configs.getAsJsonObject(config));
             PlayerSpec player = randomPlayer(inventoryNames);
-            BetterBlockPos start = R.nextInt(8) == 0
-                    ? new BetterBlockPos(X0 + R.nextInt(SX), MIN_Y + R.nextInt(HEIGHT), Z0 + R.nextInt(SZ))
-                    : standable(world, bsi);
-            BetterBlockPos realStart = R.nextInt(8) == 0 ? start.relative(Direction.from3DDataValue(R.nextInt(6))) : start;
-            GoalCase goal = randomGoal(world, bsi, start);
 
             CalculationContext context = context(baritone, level, bsi, inventories.get(player.inventory), player);
 
@@ -869,14 +1129,12 @@ final class PathRefGen {
             o.add("real_start", pos(realStart));
             o.add("start", pos(start));
             o.add("goal", goal.spec());
+            o.add("timeouts", row(primaryTimeout, failureTimeout));
+            if (cancelAfter != 0) {
+                o.addProperty("cancel_after", cancelAfter);
+            }
             if (favored != null) {
-                JsonArray f = new JsonArray();
-                for (BetterBlockPos p : favored) {
-                    f.add(p.x);
-                    f.add(p.y);
-                    f.add(p.z);
-                }
-                o.add("favoring", f);
+                o.add("favoring", flatPositions(favored));
             }
             o.add("avoidances", avoidances);
             JsonObject ctx = new JsonObject();
@@ -886,19 +1144,18 @@ final class PathRefGen {
             ctx.add("water_walk_speed", d(context.waterWalkSpeed));
             o.add("context", ctx);
 
-            AStarPathFinder finder = new AStarPathFinder(realStart, start.x, start.y, start.z, goal.goal(), favoring, context);
-            PathCalculationResult result = finder.calculate(TIMEOUT, TIMEOUT);
+            CancellingGoal cancelling = cancelAfter != 0 ? new CancellingGoal(goal.goal(), cancelAfter) : null;
+            AStarPathFinder finder = new AStarPathFinder(realStart, start.x, start.y, start.z,
+                    cancelling != null ? cancelling : goal.goal(), favoring, context);
+            if (cancelling != null) {
+                cancelling.finder = finder;
+            }
+            PathCalculationResult result = finder.calculate(primaryTimeout, failureTimeout);
             JsonObject r = new JsonObject();
             r.addProperty("type", result.getType().name());
             if (result.getPath().isPresent()) {
                 IPath path = result.getPath().get();
-                JsonArray positions = new JsonArray();
-                for (BetterBlockPos p : path.positions()) {
-                    positions.add(p.x);
-                    positions.add(p.y);
-                    positions.add(p.z);
-                }
-                r.add("positions", positions);
+                r.add("positions", flatPositions(path.positions()));
                 // [class, cost bits, calculatedWhileLoaded]
                 JsonArray movements = new JsonArray();
                 for (IMovement m : path.movements()) {
@@ -908,10 +1165,71 @@ final class PathRefGen {
                 r.addProperty("num_nodes", path.getNumNodesConsidered());
                 previous = path.positions();
             }
+            // the search's state after it ended, for every result (failures included): how many
+            // nodes it created, the chain to the node it considered last, and the best partial path
+            r.addProperty("map_size", mapSize(finder));
+            r.add("most_recent", finder.pathToMostRecentNodeConsidered()
+                    .map(p -> (JsonElement) flatPositions(p.positions())).orElse(JsonNull.INSTANCE));
+            r.add("best_so_far", finder.bestPathSoFar()
+                    .map(p -> (JsonElement) flatPositions(p.positions())).orElse(JsonNull.INSTANCE));
             o.add("result", r);
             out.add(o);
         }
         return out;
+    }
+
+    /**
+     * A goal that cancels its path finder on the {@code after}th {@code isInGoal} call (the
+     * search makes one per node it considers), so cancellation happens at the same point
+     * wherever it runs.
+     */
+    static final class CancellingGoal implements Goal {
+        final Goal goal;
+        final int after;
+        int calls;
+        AStarPathFinder finder;
+
+        CancellingGoal(Goal goal, int after) {
+            this.goal = goal;
+            this.after = after;
+        }
+
+        @Override
+        public boolean isInGoal(int x, int y, int z) {
+            if (++calls == after) {
+                finder.cancel();
+            }
+            return goal.isInGoal(x, y, z);
+        }
+
+        @Override
+        public double heuristic(int x, int y, int z) {
+            return goal.heuristic(x, y, z);
+        }
+
+        @Override
+        public double heuristic() {
+            return goal.heuristic();
+        }
+    }
+
+    private static JsonArray flatPositions(List<BetterBlockPos> positions) {
+        JsonArray a = new JsonArray();
+        for (BetterBlockPos p : positions) {
+            a.add(p.x);
+            a.add(p.y);
+            a.add(p.z);
+        }
+        return a;
+    }
+
+    /**
+     * {@code AbstractNodeCostSearch.mapSize()}, which is protected.
+     */
+    private static int mapSize(AStarPathFinder finder) throws ReflectiveOperationException {
+        java.lang.reflect.Method method = AbstractNodeCostSearch.class.getDeclaredMethod("mapSize");
+        method.setAccessible(true);
+        return (int) method.invoke(finder);
     }
 
     /**
@@ -954,11 +1272,11 @@ final class PathRefGen {
     }
 
     private static GenWorld flat() {
-        GenWorld w = new GenWorld("flat");
+        GenWorld w = new GenWorld("flat", OVERWORLD);
         for (int x = X0; x < X0 + SX; x++) {
             for (int z = Z0; z < Z0 + SZ; z++) {
-                w.set(x, MIN_Y, z, Blocks.BEDROCK.defaultBlockState());
-                for (int y = MIN_Y + 1; y < 0; y++) {
+                w.set(x, w.minY, z, Blocks.BEDROCK.defaultBlockState());
+                for (int y = w.minY + 1; y < 0; y++) {
                     w.set(x, y, z, Blocks.STONE.defaultBlockState());
                 }
                 w.set(x, 0, z, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -977,7 +1295,7 @@ final class PathRefGen {
     }
 
     private static GenWorld noise(List<BlockState> allStates) {
-        GenWorld w = new GenWorld("noise");
+        GenWorld w = new GenWorld("noise", OVERWORLD);
         int wAir = 20 + R.nextInt(40);
         int wStone = 10 + R.nextInt(30);
         int wWater = R.nextInt(15);
@@ -986,7 +1304,7 @@ final class PathRefGen {
         int total = wAir + wStone + wWater + wInteresting + wAny;
         for (int x = X0; x < X0 + SX; x++) {
             for (int z = Z0; z < Z0 + SZ; z++) {
-                for (int y = MIN_Y; y < -4; y++) {
+                for (int y = w.minY; y < -4; y++) {
                     w.set(x, y, z, Blocks.STONE.defaultBlockState());
                 }
                 w.set(x, -4, z, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -1011,12 +1329,18 @@ final class PathRefGen {
         return w;
     }
 
-    private static GenWorld terrain(List<BlockState> allStates) {
-        GenWorld w = new GenWorld("terrain");
+    /**
+     * Rolling terrain with a sea, caves and features. In the Nether shape the sea is lava and the
+     * ground is Nether blocks; its surface is close to the build limit.
+     */
+    private static GenWorld terrain(List<BlockState> allStates, Shape shape) {
+        GenWorld w = new GenWorld("terrain", shape);
+        boolean nether = shape.nether();
+        Block fluid = nether ? Blocks.LAVA : Blocks.WATER;
         double a1 = R.nextDouble() * 6.28, a2 = R.nextDouble() * 6.28, a3 = R.nextDouble() * 6.28;
         double f1 = 4 + R.nextDouble() * 8, f2 = 4 + R.nextDouble() * 8, f3 = 6 + R.nextDouble() * 10;
         int amp1 = R.nextInt(5), amp2 = R.nextInt(4), amp3 = 1 + R.nextInt(4);
-        int base = 4 + R.nextInt(8);
+        int base = w.minY + 36 + R.nextInt(8);
         boolean bedrock = R.nextInt(3) != 0;
         int waterLevel = base + R.nextInt(3) - 1;
         int[][] h = new int[SX][SZ];
@@ -1024,39 +1348,47 @@ final class PathRefGen {
             for (int z = Z0; z < Z0 + SZ; z++) {
                 int top = base + (int) Math.round(amp1 * Math.sin(x / f1 + a1) + amp2 * Math.cos(z / f2 + a2) + amp3 * Math.sin((x + z) / f3 + a3));
                 h[x - X0][z - Z0] = top;
-                for (int y = MIN_Y; y < top; y++) {
+                for (int y = w.minY; y < top; y++) {
                     BlockState s;
-                    if (y == MIN_Y && bedrock) {
+                    if (y == w.minY && bedrock) {
                         s = Blocks.BEDROCK.defaultBlockState();
                     } else if (y < top - 4) {
                         int r = R.nextInt(100);
-                        s = r < 3 ? pick(Blocks.IRON_ORE, Blocks.COAL_ORE, Blocks.DIAMOND_ORE, Blocks.GRAVEL, Blocks.ANDESITE, Blocks.INFESTED_STONE)
-                                : Blocks.STONE.defaultBlockState();
+                        if (nether) {
+                            s = r < 5 ? pick(Blocks.NETHER_QUARTZ_ORE, Blocks.NETHER_GOLD_ORE, Blocks.GLOWSTONE, Blocks.MAGMA_BLOCK, Blocks.GRAVEL, Blocks.BLACKSTONE, Blocks.ANCIENT_DEBRIS)
+                                    : Blocks.NETHERRACK.defaultBlockState();
+                        } else {
+                            s = r < 3 ? pick(Blocks.IRON_ORE, Blocks.COAL_ORE, Blocks.DIAMOND_ORE, Blocks.GRAVEL, Blocks.ANDESITE, Blocks.INFESTED_STONE)
+                                    : Blocks.STONE.defaultBlockState();
+                        }
                     } else if (y < top - 1) {
-                        s = Blocks.DIRT.defaultBlockState();
+                        s = nether ? pick(Blocks.NETHERRACK, Blocks.SOUL_SOIL) : Blocks.DIRT.defaultBlockState();
+                    } else if (nether) {
+                        s = top - 1 < waterLevel ? pick(Blocks.SOUL_SAND, Blocks.GRAVEL, Blocks.MAGMA_BLOCK)
+                                : pick(Blocks.NETHERRACK, Blocks.NETHERRACK, Blocks.SOUL_SAND, Blocks.SOUL_SOIL, Blocks.CRIMSON_NYLIUM, Blocks.BASALT);
                     } else {
                         s = top - 1 < waterLevel ? pick(Blocks.SAND, Blocks.GRAVEL, Blocks.DIRT, Blocks.CLAY) : Blocks.GRASS_BLOCK.defaultBlockState();
                     }
                     w.set(x, y, z, s);
                 }
                 for (int y = top; y <= waterLevel; y++) {
-                    w.set(x, y, z, Blocks.WATER.defaultBlockState());
+                    w.set(x, y, z, fluid.defaultBlockState());
                 }
             }
         }
-        // shores: some flowing water next to the edges
+        // shores: some flowing fluid next to the edges
         for (int i = 0; i < 40; i++) {
             int x = X0 + R.nextInt(SX), z = Z0 + R.nextInt(SZ);
             int y = h[x - X0][z - Z0];
             if (y > waterLevel && y <= waterLevel + 2) {
-                w.set(x, y, z, BlockRefGen.anyStateOf(Blocks.WATER));
+                w.set(x, y, z, BlockRefGen.anyStateOf(fluid));
             }
         }
         // caves
         for (int i = R.nextInt(7); i > 0; i--) {
             int cx = X0 + R.nextInt(SX), cz = Z0 + R.nextInt(SZ);
             int top = h[cx - X0][cz - Z0];
-            int cy = MIN_Y + 3 + R.nextInt(Math.max(1, top - MIN_Y - 6));
+            int cy = w.minY + 3 + R.nextInt(Math.max(1, top - w.minY - 6));
             int r = 2 + R.nextInt(3);
             BlockState floor = switch (R.nextInt(5)) {
                 case 0 -> Blocks.WATER.defaultBlockState();
@@ -1067,7 +1399,7 @@ final class PathRefGen {
                 for (int y = cy - r; y <= cy + r; y++) {
                     for (int z = cz - r; z <= cz + r; z++) {
                         int dx = x - cx, dy = y - cy, dz = z - cz;
-                        if (dx * dx + dy * dy + dz * dz <= r * r && y > MIN_Y && !w.get(x, y, z).is(Blocks.BEDROCK)) {
+                        if (dx * dx + dy * dy + dz * dz <= r * r && y > w.minY && !w.get(x, y, z).is(Blocks.BEDROCK)) {
                             w.set(x, y, z, y == cy - r + 1 ? floor : AIR);
                         }
                     }
@@ -1077,7 +1409,7 @@ final class PathRefGen {
         // a shaft into the void in worlds without bedrock
         if (!bedrock) {
             int x = X0 + R.nextInt(SX), z = Z0 + R.nextInt(SZ);
-            for (int y = MIN_Y; y < h[x - X0][z - Z0]; y++) {
+            for (int y = w.minY; y < h[x - X0][z - Z0]; y++) {
                 w.set(x, y, z, AIR);
             }
         }
@@ -1085,7 +1417,93 @@ final class PathRefGen {
             int x = X0 + R.nextInt(SX), z = Z0 + R.nextInt(SZ);
             feature(w, x, w.surface(x, z), z, allStates);
         }
+        hotspotFeatures(w);
         return w;
+    }
+
+    /**
+     * A ladder up a pillar. Its two lowest cells are hotspots: pillaring up inside the ladder.
+     */
+    private static void ladderColumn(GenWorld w, int x, int y, int z, Direction dir) {
+        int dx = dir.getStepX(), dz = dir.getStepZ();
+        int t = 3 + R.nextInt(5);
+        for (int i = 0; i < t; i++) {
+            w.set(x, y + i, z, Blocks.COBBLESTONE.defaultBlockState());
+            w.set(x + dx, y + i, z + dz, Blocks.LADDER.defaultBlockState().setValue(LadderBlock.FACING, dir));
+        }
+        w.hotspots.add(new BetterBlockPos(x + dx, y, z + dz));
+        w.hotspots.add(new BetterBlockPos(x + dx, y + 1, z + dz));
+    }
+
+    /**
+     * Vines hanging off a pillar. The lowest vine and the cell below it are hotspots.
+     */
+    private static void vineColumn(GenWorld w, int x, int y, int z, Direction dir) {
+        int dx = dir.getStepX(), dz = dir.getStepZ();
+        int t = 3 + R.nextInt(5);
+        for (int i = 0; i < t; i++) {
+            w.set(x, y + i, z, Blocks.MOSSY_COBBLESTONE.defaultBlockState());
+        }
+        int vines = 1 + R.nextInt(t);
+        for (int i = vines; i > 0; i--) {
+            w.set(x + dx, y + t - i, z + dz, Blocks.VINE.defaultBlockState().setValue(VineBlock.getPropertyForFace(dir.getOpposite()), true));
+        }
+        w.hotspots.add(new BetterBlockPos(x + dx, y + t - vines, z + dz));
+        w.hotspots.add(new BetterBlockPos(x + dx, y + t - vines - 1, z + dz));
+    }
+
+    /**
+     * A ledge 3 to 12 blocks above a one block pool of {@code fluid} (with flowing water next to
+     * it if {@code flowingNeighbor}), for descends that fall into it. The top of the ledge is a
+     * hotspot.
+     */
+    private static void ledge(GenWorld w, int x, int z, BlockState fluid, boolean flowingNeighbor) {
+        Direction dir = horizontal();
+        int dx = dir.getStepX(), dz = dir.getStepZ();
+        int y = w.surface(x, z);
+        int h = Math.min(3 + R.nextInt(10), w.maxY() - 2 - y);
+        if (h < 1) {
+            return;
+        }
+        for (int i = 0; i < h; i++) {
+            w.set(x, y + i, z, Blocks.COBBLESTONE.defaultBlockState());
+        }
+        w.set(x, y + h, z, AIR);
+        w.set(x, y + h + 1, z, AIR);
+        int px = x + dx, pz = z + dz;
+        for (int yy = y; yy <= y + h + 1; yy++) {
+            w.set(px, yy, pz, AIR);
+        }
+        w.set(px, y - 1, pz, fluid);
+        w.set(px, y - 2, pz, Blocks.STONE.defaultBlockState());
+        if (flowingNeighbor) {
+            w.set(px + dx, y - 1, pz + dz, Blocks.WATER.defaultBlockState().setValue(LiquidBlock.LEVEL, 1 + R.nextInt(7)));
+        }
+        w.hotspots.add(new BetterBlockPos(x, y + h, z));
+    }
+
+    /**
+     * The features the extra move samples need, placed last so that nothing covers them.
+     */
+    private static void hotspotFeatures(GenWorld w) {
+        BlockState water = Blocks.WATER.defaultBlockState();
+        BlockState lava = Blocks.LAVA.defaultBlockState();
+        for (int i = 0; i < 8; i++) {
+            int x = X0 + 2 + R.nextInt(SX - 4), z = Z0 + 2 + R.nextInt(SZ - 4);
+            switch (i % 4) {
+                case 0 -> ledge(w, x, z, water, false);
+                case 1 -> ledge(w, x, z, lava, false);
+                case 2 -> ledge(w, x, z, water, true);
+                default -> ledge(w, x, z, BlockRefGen.anyStateOf(R.nextBoolean() ? Blocks.WATER : Blocks.LAVA), R.nextBoolean());
+            }
+        }
+        for (int i = 0; i < 2; i++) {
+            int x = X0 + 2 + R.nextInt(SX - 4), z = Z0 + 2 + R.nextInt(SZ - 4);
+            ladderColumn(w, x, w.surface(x, z), z, horizontal());
+            x = X0 + 2 + R.nextInt(SX - 4);
+            z = Z0 + 2 + R.nextInt(SZ - 4);
+            vineColumn(w, x, w.surface(x, z), z, horizontal());
+        }
     }
 
     private static void feature(GenWorld w, int x, int y, int z, List<BlockState> allStates) {
@@ -1140,22 +1558,8 @@ final class PathRefGen {
                     default -> w.set(px, y, pz, Blocks.OAK_FENCE.defaultBlockState());
                 }
             }
-            case 3 -> { // ladder up a pillar
-                int t = 3 + R.nextInt(5);
-                for (int i = 0; i < t; i++) {
-                    w.set(x, y + i, z, Blocks.COBBLESTONE.defaultBlockState());
-                    w.set(x + dx, y + i, z + dz, Blocks.LADDER.defaultBlockState().setValue(LadderBlock.FACING, dir));
-                }
-            }
-            case 4 -> { // vines hanging off a pillar
-                int t = 3 + R.nextInt(5);
-                for (int i = 0; i < t; i++) {
-                    w.set(x, y + i, z, Blocks.MOSSY_COBBLESTONE.defaultBlockState());
-                }
-                for (int i = 1 + R.nextInt(t); i > 0; i--) {
-                    w.set(x + dx, y + t - i, z + dz, Blocks.VINE.defaultBlockState().setValue(VineBlock.getPropertyForFace(dir.getOpposite()), true));
-                }
-            }
+            case 3 -> ladderColumn(w, x, y, z, dir);
+            case 4 -> vineColumn(w, x, y, z, dir);
             case 5 -> { // steps of slabs, stairs and full blocks
                 int yy = y;
                 for (int i = 0; i < 3 + R.nextInt(4); i++) {

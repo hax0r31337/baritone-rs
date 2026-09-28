@@ -129,9 +129,18 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   that needs a `BlockStateInterface` gets `BlockRefGen.FakeBsi`, a subclass over a map of
   blocks created without running the client-bound constructor.
 - `tests/fixtures/reference/paths.json.gz`: path calculations by the real `AStarPathFinder` in
-  generated worlds (terrain, block noise, flat) under four settings configurations and five
-  inventories, the raw result of every `Moves` at sampled positions, and `ToolSet` speeds and
-  slots for every block (`PathRefGen`). The client objects the code reaches for are stand-ins
+  generated worlds (terrain in an Overworld and a low Nether shape, block noise, flat) under
+  four hand-made settings configurations plus random mixes, and six inventories (one
+  enchanted), the raw result of every `Moves` at sampled positions, and `ToolSet` speeds and
+  slots for every block (`PathRefGen`). Every calculation records the search's map size, most
+  recent node and best path so far, so failed searches are compared too; a few targeted
+  queries per world reach `Path`'s fake start node, "movement became impossible", the
+  load-boundary cutoff, cancellation (by a goal that cancels on its Nth `isInGoal`), timeouts
+  (0, which expires at the first check) and `slowPath` (without the delay). Extra move samples
+  sit at ledges above pools and inside ladder and vine columns, with settings changed after the
+  context was built and with `WalkOffCalculationContext`'s fields. The one branch no fixture
+  reaches is `MovementDescend.dynamicFallCost`'s flowing water check: `canWalkThrough` has
+  already rejected flowing water there, upstream too. The client objects the code reaches for are stand-ins
   allocated without a constructor (`ClientLevel`, `LocalPlayer`, an array-backed
   `BlockStateInterface`, an `IBaritone` proxy); the `CalculationContext` is allocated the same
   way and its fields are set with the expressions of upstream's constructor, and `PathRefGen`

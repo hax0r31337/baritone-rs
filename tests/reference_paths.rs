@@ -3,17 +3,19 @@
 //! movements, `Path`, `ToolSet` and `Favoring`) running against the real Minecraft client's
 //! blocks and items.
 //!
-//! The fixture holds generated worlds (terrain, block noise, flat), settings configurations and
-//! inventories, and for each world: path calculations (start, goal, player, favoring, and the
-//! upstream result: type, positions, movements with their costs, nodes considered) and the raw
-//! result of every `Moves` at sampled positions. It also holds `ToolSet` break speeds and best
+//! The fixture holds generated worlds (terrain in the Overworld and the Nether, block noise,
+//! flat), settings configurations and inventories, and for each world: path calculations
+//! (start, goal, player, favoring, and the upstream result: type, positions, movements with
+//! their costs, nodes considered, and for every result the search's map size, most recent node
+//! and best path so far) and the raw result of every `Moves` at sampled positions. It also holds `ToolSet` break speeds and best
 //! slots for every block. Costs are compared bit for bit. The block state table comes from
 //! `fixtures/reference/blocks.json.gz`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io::Read;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 
 use baritone::api::pathing::calc::{IPath, IPathFinder};
 use baritone::api::pathing::goals::{
@@ -42,10 +44,7 @@ use serde_json::Value;
 struct Fixture {
     upstream: String,
     minecraft: String,
-    min_y: i32,
-    height: i32,
     chunk_range: [i32; 2],
-    timeout: i64,
     configs: BTreeMap<String, Value>,
     inventories: BTreeMap<String, Inventory>,
     tool_set: Vec<ToolSetCase>,
@@ -74,6 +73,10 @@ struct ToolSetCase {
 #[derive(Deserialize)]
 struct FixtureWorld {
     kind: String,
+    min_y: i32,
+    height: i32,
+    /// The Nether (by dimension key): no water bucket falls.
+    nether: bool,
     /// [id, count, ...]; x outermost, then z, then y
     blocks: Vec<u32>,
     loaded_chunks: Vec<[i32; 2]>,
@@ -88,7 +91,12 @@ type MoveResult = (usize, i32, i32, i32, i64);
 
 #[derive(Deserialize)]
 struct MoveSample {
+    /// The settings the context is built with.
     config: String,
+    /// The settings the moves then run with, when they changed after the context was built.
+    live_config: Option<String>,
+    /// With the fields `ElytraProcess.WalkOffCalculationContext` sets.
+    walk_off: bool,
     player: PlayerSpec,
     /// x, y, z, and the result of every move with a finite cost
     positions: Vec<(i32, i32, i32, Vec<MoveResult>)>,
@@ -101,6 +109,10 @@ struct Query {
     real_start: [i32; 3],
     start: [i32; 3],
     goal: Value,
+    /// Primary and failure timeout.
+    timeouts: [i64; 2],
+    /// The goal cancels the search on this `is_in_goal` call (see `CancellingGoal`).
+    cancel_after: Option<u32>,
     /// Positions of the previous path, flattened.
     favoring: Option<Vec<i32>>,
     /// x, y, z, coefficient bits, radius
@@ -125,6 +137,11 @@ struct ResultRef {
     /// class, cost bits, calculatedWhileLoaded
     movements: Option<Vec<(String, i64, bool)>>,
     num_nodes: Option<i32>,
+    /// The search's state after it ended, for every result: nodes created, and the positions
+    /// of `pathToMostRecentNodeConsidered` and `bestPathSoFar`.
+    map_size: usize,
+    most_recent: Option<Vec<i32>>,
+    best_so_far: Option<Vec<i32>>,
 }
 
 fn gunzip(bytes: &[u8]) -> String {
@@ -152,8 +169,13 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_config(config: &str) -> MutexGuard<'static, ()> {
     let guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    set_settings(serde_json::from_value(FIXTURE.configs[config].clone()).unwrap());
+    apply_config(config);
     guard
+}
+
+/// Only while holding the guard `with_config` returns.
+fn apply_config(config: &str) {
+    set_settings(serde_json::from_value(FIXTURE.configs[config].clone()).unwrap());
 }
 
 fn dbl(bits: i64) -> f64 {
@@ -179,14 +201,14 @@ fn player(spec: &PlayerSpec) -> Arc<Player> {
 
 fn build_world(w: &FixtureWorld) -> Arc<World> {
     let dimension = DimensionType {
-        min_y: FIXTURE.min_y,
-        height: FIXTURE.height,
-        water_evaporates: false,
+        min_y: w.min_y,
+        height: w.height,
+        water_evaporates: w.nether,
     };
     let [cmin, cmax] = FIXTURE.chunk_range;
     let (x0, z0) = (cmin * 16, cmin * 16);
     let size = ((cmax - cmin + 1) * 16) as usize;
-    let height = FIXTURE.height as usize;
+    let height = w.height as usize;
     let mut blocks = Vec::with_capacity(size * size * height);
     for pair in w.blocks.chunks(2) {
         blocks.extend(std::iter::repeat_n(pair[0], pair[1] as usize));
@@ -267,6 +289,43 @@ fn build_goal(spec: &Value) -> Arc<dyn Goal> {
         )),
         "GoalInverted" => Arc::new(GoalInverted::new(build_goal(&spec["origin"]))),
         kind => panic!("unknown goal kind {kind}"),
+    }
+}
+
+/// `PathRefGen.CancellingGoal`: cancels the search on the `after`th `is_in_goal` call (the
+/// search makes one per node it considers), so it stops at the same node as upstream's.
+#[derive(Debug)]
+struct CancellingGoal {
+    goal: Arc<dyn Goal>,
+    after: u32,
+    calls: AtomicU32,
+    cancel: OnceLock<Arc<AtomicBool>>,
+}
+
+impl std::fmt::Display for CancellingGoal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CancellingGoal{{{}, after {}}}", self.goal, self.after)
+    }
+}
+
+impl Goal for CancellingGoal {
+    fn is_in_goal(&self, x: i32, y: i32, z: i32) -> bool {
+        if self.calls.fetch_add(1, Ordering::Relaxed) + 1 == self.after {
+            self.cancel.get().unwrap().store(true, Ordering::Relaxed);
+        }
+        self.goal.is_in_goal(x, y, z)
+    }
+
+    fn heuristic(&self, x: i32, y: i32, z: i32) -> f64 {
+        self.goal.heuristic(x, y, z)
+    }
+
+    fn heuristic_at_goal(&self) -> f64 {
+        self.goal.heuristic_at_goal()
+    }
+
+    fn equals(&self, _other: &dyn Goal) -> bool {
+        false
     }
 }
 
@@ -377,12 +436,20 @@ fn moves_match_upstream() {
         let world = build_world(w);
         for sample in &w.move_samples {
             let _settings = with_config(&sample.config);
-            let context = CalculationContext::new(
+            let mut context = CalculationContext::new(
                 Arc::clone(&world),
                 player(&sample.player),
                 sample.player.throwaway,
                 true,
             );
+            if sample.walk_off {
+                context.allow_fall_into_lava = true;
+                context.min_fall_height = 8;
+                context.max_fall_height_no_water = 10000;
+            }
+            if let Some(live) = &sample.live_config {
+                apply_config(live);
+            }
             let mut res = MutableMoveResult::new();
             for (x, y, z, expected) in &sample.positions {
                 let mut got = Vec::new();
@@ -404,9 +471,11 @@ fn moves_match_upstream() {
                         s
                     };
                     mismatches.push(format!(
-                        "world {index} ({}), config {}, {:?}, at ({x}, {y}, {z}):\n  got     {}\n  upstream{}",
+                        "world {index} ({}), config {} (live {:?}, walk off {}), {:?}, at ({x}, {y}, {z}):\n  got     {}\n  upstream{}",
                         w.kind,
                         sample.config,
+                        sample.live_config,
+                        sample.walk_off,
                         sample.player,
                         describe(&got),
                         describe(expected)
@@ -472,16 +541,31 @@ fn paths_match_upstream() {
             );
             let [rx, ry, rz] = q.real_start;
             let [sx, sy, sz] = q.start;
+            let cancelling = q.cancel_after.map(|after| {
+                Arc::new(CancellingGoal {
+                    goal: Arc::clone(&goal),
+                    after,
+                    calls: AtomicU32::new(0),
+                    cancel: OnceLock::new(),
+                })
+            });
             let mut finder = AStarPathFinder::new(
                 BetterBlockPos::new(rx, ry, rz),
                 sx,
                 sy,
                 sz,
-                goal,
+                match &cancelling {
+                    Some(c) => Arc::clone(c) as Arc<dyn Goal>,
+                    None => goal,
+                },
                 favoring,
                 context,
             );
-            let result = finder.calculate(FIXTURE.timeout, FIXTURE.timeout);
+            if let Some(c) = &cancelling {
+                c.cancel.set(finder.search().cancel_handle()).unwrap();
+            }
+            let [primary_timeout, failure_timeout] = q.timeouts;
+            let result = finder.calculate(primary_timeout, failure_timeout);
             let type_ = match result.get_type() {
                 Type::SuccessToGoal => "SUCCESS_TO_GOAL",
                 Type::SuccessSegment => "SUCCESS_SEGMENT",
@@ -494,6 +578,41 @@ fn paths_match_upstream() {
                     "{where_}: result {type_}, upstream {}",
                     q.result.type_
                 ));
+                continue;
+            }
+            // the search itself, also when it failed
+            let map_size = finder.search().map_size();
+            if map_size != q.result.map_size {
+                mismatches.push(format!(
+                    "{where_} ({type_}): {map_size} nodes in the map, upstream {}",
+                    q.result.map_size
+                ));
+                continue;
+            }
+            let search_paths = [
+                (
+                    "most recent node considered",
+                    finder.path_to_most_recent_node_considered(),
+                    &q.result.most_recent,
+                ),
+                (
+                    "best path so far",
+                    finder.best_path_so_far(),
+                    &q.result.best_so_far,
+                ),
+            ];
+            let mut search_differs = false;
+            for (what, got, want) in search_paths {
+                let got = got.map(|p| p.positions().to_vec());
+                let want = want.as_deref().map(positions);
+                if got != want {
+                    mismatches.push(format!(
+                        "{where_} ({type_}): path to the {what} {got:?}\n  upstream {want:?}"
+                    ));
+                    search_differs = true;
+                }
+            }
+            if search_differs {
                 continue;
             }
             let Some(path) = result.get_path() else {

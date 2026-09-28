@@ -97,6 +97,11 @@ final class BlockRefGen {
     private static final int MIN_Y = -16;
     private static final int HEIGHT = 32;
 
+    /**
+     * Datagen's vanilla registries (enchantments, ...), set by {@link #write}.
+     */
+    static HolderLookup.Provider LOOKUP;
+
     private BlockRefGen() {}
 
     static void write(String upstream, String minecraft, Path out) throws Exception {
@@ -108,6 +113,7 @@ final class BlockRefGen {
         // item components are bound when a world's registries load (like the client does in
         // RegistryDataCollector.updateComponents); datagen's vanilla registries stand in
         HolderLookup.Provider lookup = VanillaRegistries.createReloadableLookup(VanillaRegistries.createWorldLookup());
+        LOOKUP = lookup;
         BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(lookup).forEach(DataComponentInitializers.PendingComponents::apply);
         if (!Items.IRON_SWORD.getDefaultInstance().is(ItemTags.SWORDS)) {
             throw new IllegalStateException("item tags not bound");
