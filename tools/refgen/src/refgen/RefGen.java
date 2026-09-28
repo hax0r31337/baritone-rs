@@ -72,6 +72,8 @@ public final class RefGen {
             t.printStackTrace(err);
             System.exit(1);
         }
+        // Baritone's calculation thread pool keeps non-daemon threads alive
+        System.exit(0);
     }
 
     private static void run(String[] args) throws Exception {
@@ -95,6 +97,7 @@ public final class RefGen {
         BlockRefGen.write(args[0], args[1], Path.of(args[4]));
         // after BlockRefGen, which binds the block and item tags
         PathRefGen.write(args[0], args[1], Path.of(args[5]));
+        ExecRefGen.write(args[0], args[1], Path.of(args[6]));
     }
 
     /**

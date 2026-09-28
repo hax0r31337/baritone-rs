@@ -1,15 +1,16 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/movements/MovementDownward.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Missing until phase 4: reset, updateState.
+// `reset` is `Movement::reset`.
 
 use rustc_hash::FxHashSet;
 
-use crate::api::pathing::movement::COST_INF;
-use crate::api::utils::BetterBlockPos;
+use crate::Baritone;
+use crate::api::pathing::movement::{COST_INF, MovementStatus};
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::pathing::movement::movement::MovementKind;
 use crate::pathing::movement::movement_helper as mh;
 use crate::pathing::movement::movements::is_ladder_or_vine;
-use crate::pathing::movement::{CalculationContext, Movement};
+use crate::pathing::movement::{CalculationContext, Movement, MovementState};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovementDownward {
@@ -51,5 +52,39 @@ impl MovementDownward {
             context.costs.fall_n_blocks_cost[1]
                 + mh::get_mining_duration_ticks_state(context, x, y - 1, z, down, false)
         }
+    }
+
+    pub(crate) fn update_state(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) {
+        m.update_state_default(baritone, state);
+        if state.get_status() != MovementStatus::Running {
+            return;
+        }
+
+        if baritone.player_context.player_feet() == m.dest {
+            state.set_status(MovementStatus::Success);
+            return;
+        } else if !m.player_in_valid_position(baritone) {
+            state.set_status(MovementStatus::Unreachable);
+            return;
+        }
+        let ctx = &baritone.player_context;
+        let position = ctx.player().position;
+        let diff_x = position.x - (m.dest.x as f64 + 0.5);
+        let diff_z = position.z - (m.dest.z as f64 + 0.5);
+        let ab = (diff_x * diff_x + diff_z * diff_z).sqrt();
+
+        let MovementKind::Downward(this) = &mut m.kind else {
+            unreachable!()
+        };
+        let num_ticks = this.num_ticks;
+        this.num_ticks = num_ticks.wrapping_add(1);
+        if num_ticks < 10 && ab < 0.2 {
+            return;
+        }
+        mh::move_towards(ctx, state, m.positions_to_break[0]);
     }
 }

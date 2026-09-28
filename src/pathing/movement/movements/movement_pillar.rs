@@ -1,15 +1,18 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/movements/MovementPillar.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Missing until phase 4: hasAgainst, getAgainst, updateState, prepared.
-
 use rustc_hash::FxHashSet;
 
-use crate::api::pathing::movement::COST_INF;
-use crate::api::utils::BetterBlockPos;
+use crate::Baritone;
+use crate::api::pathing::movement::{COST_INF, MovementStatus};
+use crate::api::utils::input::Input;
+use crate::api::utils::{BetterBlockPos, IPlayerContext, rotation_utils, vec_utils};
+use crate::behavior::InventoryBehavior;
 use crate::host::{Fluid, Openable, SlabType};
 use crate::pathing::movement::movement::MovementKind;
 use crate::pathing::movement::movement_helper as mh;
-use crate::pathing::movement::{CalculationContext, Movement};
+use crate::pathing::movement::movement_state::MovementTarget;
+use crate::pathing::movement::{CalculationContext, Movement, MovementState};
+use crate::utils::BlockStateInterface;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovementPillar;
@@ -117,5 +120,152 @@ impl MovementPillar {
         } else {
             costs.jump_one_block_cost + place_cost + context.jump_penalty + hardness
         }
+    }
+
+    pub(crate) fn update_state(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) {
+        m.update_state_default(baritone, state);
+        if state.get_status() != MovementStatus::Running {
+            return;
+        }
+
+        let (src, dest) = (m.src, m.dest);
+        let position_to_place = m.position_to_place.expect("positionToPlace");
+        let ctx = &baritone.player_context;
+        if ctx.player_feet().y < src.y {
+            state.set_status(MovementStatus::Unreachable);
+            return;
+        }
+
+        let from_down = BlockStateInterface::get(ctx, src);
+        if mh::is_water(from_down) && mh::is_water_ctx(ctx, dest) {
+            // stay centered while swimming up a water column
+            state.set_target(MovementTarget::new(
+                rotation_utils::calc_rotation_from_vec3d(
+                    ctx.player_head(),
+                    vec_utils::get_block_pos_center(dest),
+                    ctx.player_rotations(),
+                ),
+                false,
+            ));
+            let dest_center = vec_utils::get_block_pos_center(dest);
+            let position = ctx.player().position;
+            if (position.x - dest_center.x).abs() > 0.2 || (position.z - dest_center.z).abs() > 0.2
+            {
+                state.set_input(Input::MoveForward, true);
+            }
+            if ctx.player_feet() == dest {
+                state.set_status(MovementStatus::Success);
+            }
+            return;
+        }
+        let ladder = mh::is_climbable(from_down);
+
+        let rotation = rotation_utils::calc_rotation_from_vec3d(
+            ctx.player_head(),
+            vec_utils::get_block_pos_center(position_to_place),
+            ctx.player_rotations(),
+        );
+        if !ladder {
+            state.set_target(MovementTarget::new(
+                ctx.player_rotations().with_pitch(rotation.get_pitch()),
+                true,
+            ));
+        }
+
+        let mut block_is_there = mh::can_walk_on_ctx(ctx, src) || ladder;
+        if ladder {
+            if ctx.player_feet() == dest {
+                state.set_status(MovementStatus::Success);
+                return;
+            }
+
+            mh::move_towards(ctx, state, dest);
+            state.set_input(Input::Jump, true);
+            return;
+        } else {
+            // Get ready to place a throwaway block
+            if !InventoryBehavior::select_throwaway_for_location(
+                baritone, true, src.x, src.y, src.z,
+            ) {
+                state.set_status(MovementStatus::Unreachable);
+                return;
+            }
+            let ctx = &baritone.player_context;
+
+            state.set_input(Input::Sneak, true);
+            // since (lower down) we only right click once player.isSneaking, and that happens the tick after we request to sneak
+
+            let player = ctx.player();
+            let diff_x = player.position.x - (dest.x as f64 + 0.5);
+            let diff_z = player.position.z - (dest.z as f64 + 0.5);
+            let dist = (diff_x * diff_x + diff_z * diff_z).sqrt();
+            let delta_movement = player.delta_movement;
+            let flat_motion =
+                (delta_movement.x * delta_movement.x + delta_movement.z * delta_movement.z).sqrt();
+            if dist > 0.17 {
+                //why 0.17? because it seemed like a good number, that's why
+                //[explanation added after baritone port lol] also because it needs to be less than 0.2 because of the 0.3 sneak limit
+                //and 0.17 is reasonably less than 0.2
+
+                // If it's been more than forty ticks of trying to jump and we aren't done yet, go forward, maybe we are stuck
+                state.set_input(Input::MoveForward, true);
+
+                // revise our target to both yaw and pitch if we're going to be moving forward
+                state.set_target(MovementTarget::new(rotation, true));
+            } else if flat_motion < 0.05 {
+                // If our Y coordinate is above our goal, stop jumping
+                state.set_input(Input::Jump, player.position.y < dest.y as f64);
+            }
+
+            if !block_is_there {
+                let fr_state = BlockStateInterface::get(ctx, src);
+                // TODO: Evaluate usage of getMaterial().isReplaceable()
+                if !(fr_state.air || fr_state.replaceable) {
+                    if let Some(rot) = rotation_utils::reachable_distance(
+                        ctx,
+                        baritone.look_behavior.get_aim_processor(),
+                        src,
+                        ctx.player_controller_ref().get_block_reach_distance(),
+                    ) {
+                        state.set_target(MovementTarget::new(rot, true));
+                    }
+                    state.set_input(Input::Jump, false); // breaking is like 5x slower when you're jumping
+                    state.set_input(Input::ClickLeft, true);
+                    block_is_there = false;
+                } else if player.crouching
+                    && (ctx.is_looking_at(src.below()) || ctx.is_looking_at(src))
+                    && player.position.y > dest.y as f64 + 0.1
+                {
+                    state.set_input(Input::ClickRight, true);
+                }
+            }
+        }
+
+        // If we are at our goal and the block below us is placed
+        if baritone.player_context.player_feet() == dest && block_is_there {
+            state.set_status(MovementStatus::Success);
+        }
+    }
+
+    pub(crate) fn prepared(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) -> bool {
+        let ctx = &baritone.player_context;
+        if ctx.player_feet() == m.src || ctx.player_feet() == m.src.below() {
+            let block = BlockStateInterface::get_block(ctx, m.src.below());
+            if mh::is_climbable(block) {
+                state.set_input(Input::Sneak, true);
+            }
+        }
+        if mh::is_water_ctx(ctx, m.dest.above()) {
+            return true;
+        }
+        m.prepared_default(baritone, state)
     }
 }

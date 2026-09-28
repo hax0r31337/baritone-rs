@@ -1,10 +1,36 @@
 // Ported from baritone src/api/java/baritone/api/utils/VecUtils.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// `calculateBlockCenter` needs block shapes from the world model and is ported with it
-// (phase 2). The entity overloads take the entity position instead of the entity.
+// The entity overloads take the entity position instead of the entity.
 
 use crate::api::utils::BetterBlockPos;
-use crate::mc::Vec3;
+use crate::host::World;
+use crate::mc::{Axis, Vec3};
+
+/// Calculates the center of the block at the specified position's bounding box
+///
+/// Panics if the shape's center is NaN, like upstream's `IllegalStateException`.
+pub fn calculate_block_center(world: &World, pos: BetterBlockPos) -> Vec3 {
+    let b = world.get_block_state(pos);
+    let shape = b.get_collision_shape(pos);
+    if shape.is_empty() {
+        return get_block_pos_center(pos);
+    }
+    let x_diff = (shape.min(Axis::X) + shape.max(Axis::X)) / 2.0;
+    let mut y_diff = (shape.min(Axis::Y) + shape.max(Axis::Y)) / 2.0;
+    let z_diff = (shape.min(Axis::Z) + shape.max(Axis::Z)) / 2.0;
+    if x_diff.is_nan() || y_diff.is_nan() || z_diff.is_nan() {
+        panic!("{} {} {:?}", b.name, pos, shape);
+    }
+    if b.fire {
+        //look at bottom of fire when putting it out
+        y_diff = 0.0;
+    }
+    Vec3::new(
+        pos.x as f64 + x_diff,
+        pos.y as f64 + y_diff,
+        pos.z as f64 + z_diff,
+    )
+}
 
 /// Gets the assumed center position of the given block position. This is done by adding 0.5 to
 /// the X, Y, and Z axes.

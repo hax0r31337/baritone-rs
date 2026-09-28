@@ -196,6 +196,7 @@ fn player(spec: &PlayerSpec) -> Arc<Player> {
             .collect(),
         frost_walker: spec.frost_walker,
         water_movement_efficiency: spec.water_efficiency.map(f32::from_bits),
+        ..Player::default()
     })
 }
 
@@ -338,6 +339,10 @@ struct PositionsPath {
 
 impl IPath for PositionsPath {
     fn movements(&self) -> &[Movement] {
+        unimplemented!()
+    }
+
+    fn movements_mut(&mut self) -> &mut [Movement] {
         unimplemented!()
     }
 

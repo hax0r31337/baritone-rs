@@ -3,8 +3,8 @@
 This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) that asks about Minecraft
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
 upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
-table version 2); the field list is at the end. Item and player checks map to `crate::host::player`
-(Table D). Locations are `File.java:line`; every file name used
+table version 3); the field list is at the end. Item and player checks map to `crate::host::player`
+(Table D), other entities to `crate::host::Entity`. Locations are `File.java:line`; every file name used
 here is unique in the kept scope. `MH` = `MovementHelper.java`.
 
 `tools/refgen` exports the whole table from a real 26.3 client (`tests/fixtures/reference/blocks.json.gz`),
@@ -30,6 +30,9 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
   - `can_walk_through`: `!air && blocksToAvoid ∋ name` → NO. The default `blocksToAvoid` is `[tripwire]`
     (Settings.java:240).
   - `fully_passable`: no settings are involved.
+- **Shapes without an entity.** The table's shapes are computed with an empty collision context. The
+  client clips outline shapes with the player's (`ClipContext` with an entity), which differs for
+  scaffolding while holding scaffolding (a full block) and light blocks while holding a light (visible).
 - **No chunk cache.** Upstream's snow checks return true when the chunk is not loaded (MH:198,313),
   for snow read from the cache. The port reads air for unloaded chunks, so these branches are
   unreachable; they are kept for fidelity.
@@ -70,7 +73,7 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `GLASS` | `can_walk_on` (YES), `can_place_against` | MH:425,586 | Two uses: walk-on YES, can place against |
 | `HONEY_BLOCK` | `can_walk_through` (NO), `can_walk_on` (`speed_kind=Honey`) | MH:146,410 | Walk-through NO; excluded from the normal-cube walk-on YES |
 | `ICE` | `avoid_breaking` | MH:75 | Breaking ice turns it into water |
-| `IRON_DOOR` | `hand_openable = false` | MH:160; MovementTraverse.java:228 | Two uses: walk-through NO (the door cannot be opened), and Traverse does not right-click it |
+| `IRON_DOOR` | `hand_openable = false` (Traverse: `openable == Door && !hand_openable`, since iron trapdoors are not iron doors) | MH:160; MovementTraverse.java:228 | Two uses: walk-through NO (the door cannot be opened), and Traverse does not right-click it |
 | `JUNGLE_LOG` | `name` | FarmProcess.java:204,246 | Cocoa planting support |
 | `LADDER` | `climbable = Ladder`; `fully_passable` (NO); `can_walk_on` (YES); `facing` | MH:243,416,595; MovementDescend.java:117; MovementDownward.java:66; MovementFall.java:170; MovementParkour.java:272 | Several uses: climbable, never fully passable, always walk-on, Descend/Downward/Parkour ladder cases, Fall reads `FACING` to steer away |
 | `LARGE_FERN` | `replaceable` | MH:319 | Forced replaceable (double plant). `canBeReplaced()` is already true in 26.3 (refgen asserts it), so the port drops the check |
@@ -130,7 +133,7 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `ScaffoldingBlock` | `normal_cube` (`climbable = Scaffolding`) | MH:780 | Excluded |
 | `ShulkerBoxBlock` | `can_walk_through` (NO), `fully_passable` (NO), `normal_cube` | MH:146,253,781 | The box can open |
 | `SkullBlock` | `fully_passable` (NO) | MH:252 | Floor skulls only (see Caveats) |
-| `SlabBlock` | `slab` | MH:146,437,535,639; MovementPillar.java:67; MovementTraverse.java:158,289 | Several uses: walk-through NO, walk-on depends on type, `isBottomSlab`, cannot backplace against a half slab, bridging edge case |
+| `SlabBlock` | `slab` | MH:146,437,535,639; MovementPillar.java:67; MovementTraverse.java:158,289; IPlayerContext.java:76 | Several uses: walk-through NO, walk-on depends on type, `isBottomSlab`, cannot backplace against a half slab, bridging edge case, `playerFeet` on a slab is the block above |
 | `SnowLayerBlock` | `snow_layers` | MH:168,198,248,312 | Walk-through MAYBE (at 3+ layers it blocks); never fully passable; replaceable only with 1 layer |
 | `StainedGlassBlock` | `can_walk_on` (YES), `can_place_against` | MH:425,586 | Same as `GLASS` |
 | `StairBlock` | `stairs` | MH:428,539; MovementParkour.java:94 | Walk-on YES; solid when waterlogged if top or inner corner; no parkour from stairs |
@@ -163,9 +166,10 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `isPathfindable(PathComputationType.LAND)` | `pathfindable_land` (new) | MH:184,230,258,286,293 | Fallback for walk-through and fully passable. 184/258 are inside the tri-states; 230/286/293 run at runtime |
 | `canBeReplaced()` | `replaceable` | MH:322; MovementPillar.java:212 | Can place into it; pillar decides whether it must break the block first |
 | `Block.isShapeFullBlock(getCollisionShape(null,null))` | `normal_cube` (new) | MH:787 (exclusions at 778-783) | `isBlockNormalCube`: a full collision cube with no world context. Position-dependent shapes throw, which counts as false |
-| `getCollisionShape(world,pos)` | `collision_shape` | VecUtils.java:51 | Aim point = center of the collision bounds. Empty shape → block center |
-| `getShape(world,pos)` (outline), `Shapes.block()` | `outline_shape` | RotationUtils.java:211,213 | Side-offset aim points. Empty shape → unit cube |
-| `level.clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)` | `outline_shape` | RayTraceUtils.java:62 | Raytrace against outline shapes, ignoring fluids |
+| `getCollisionShape(world,pos)` | `collision_shape`, moved by `offset` when `offset.collision` (`BlockState::get_collision_shape`) | VecUtils.java:51 | Aim point = center of the collision bounds. Empty shape → block center |
+| `getShape(world,pos)` (outline), `Shapes.block()` | `outline_shape`, moved by `offset` when `offset.outline` (`BlockState::get_shape`) | RotationUtils.java:211,213 | Side-offset aim points. Empty shape → unit cube |
+| `level.clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)` | `outline_shape` and `interaction_shape` (`World::clip`) | RayTraceUtils.java:62 | Raytrace against outline shapes, ignoring fluids. The interaction shape (hopper, cauldron, composter, scaffolding) can change the face hit |
+| `state.getOffset(pos)` (inside `getShape` / `getCollisionShape` of flowers, bamboo, pointed dripstone, ...) | `offset` | RotationUtils.java:211; VecUtils.java:51 | Shapes that move with the block's position |
 | `getDestroySpeed(null,null)` | `hardness` | ToolSet.java:210 | < 0 or throws → unbreakable |
 | `ItemStack.getDestroySpeed(state)` | the item's `tool` rules matched against `tags` / `name` | ToolSet.java:219 | Tool speed multiplier: the first rule with a speed whose block set holds the state, else the default speed; 1 without a tool |
 | `requiresCorrectToolForDrops()`, `ItemStack.isCorrectToolForDrops(state)` | `requires_tool`; the item's `tool` rules | ToolSet.java:234 | Divide by 30 (correct tool) or 100 |
@@ -179,7 +183,7 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | state identity (`hashCode`, `==`) | state id | BlockOptionalMeta.java:145,168,173; BlockOptionalMetaLookup.java:72-78 | `matches` / `has(state)` |
 | loot table drops (`getLootTable`, default state, netherite pickaxe) | `drops` (new) | BlockOptionalMeta.java:154,223-256 | Item stacks that count as "mined" (MineProcess.java:78,350) |
 | `ctx.world().dimension() == Level.NETHER` (not block data) | world `water_evaporates` (new, world-level) | CalculationContext.java:104; MovementFall.java:105 | No water-bucket falls in the Nether |
-| `getEntitiesOfClass(FallingBlockEntity)` (not block data) | entity list | Movement.java:159 | Pause mining while falling blocks are in the air |
+| `getEntitiesOfClass(FallingBlockEntity)` (not block data) | `ctx.entities()` with `type_id == "minecraft:falling_block"` whose `bounding_box` intersects | Movement.java:159 | Pause mining while falling blocks are in the air |
 
 ## Table D: Items and the player
 
@@ -196,15 +200,21 @@ data driven. `tools/refgen` exports real 26.3 items (`tests/fixtures/reference/p
 | enchantment `MINING_EFFICIENCY` attribute effect | `ItemStack::mining_efficiency` (host evaluates the first such enchantment at its level) | ToolSet.java:222-231 | Added to speeds above 1 |
 | `Enchantments.SILK_TOUCH` level > 0 | `ItemStack::silk_touch` | ToolSet.java:107-117 | Tie break |
 | `hasEffect(MobEffects.HASTE / MINING_FATIGUE)`, `getAmplifier()` | `Player::effects` | ToolSet.java:252-266 | Break speed amplifier |
-| `getInventory().getItem(i)`, `getSelectedSlot()`, `findSlotMatchingItem`, `isHotbarSlot` | `Inventory` | ToolSet.java:132,143; CalculationContext.java:104 | Hotbar tools; water bucket on the hotbar (matched by item id only) |
+| `getInventory().getItem(i)`, `getSelectedSlot()`, `findSlotMatchingItem`, `isHotbarSlot` | `Inventory`; `isSameItemSameComponents` against a default stack is the item id plus `!ItemStack::components_changed` | ToolSet.java:132,143; CalculationContext.java:104; MovementFall.java:105,110,126,127 | Hotbar tools; a water bucket on the hotbar (a renamed one does not count) |
 | `getFoodData().getFoodLevel()` | `Player::food_level` | CalculationContext.java:105 | Sprinting needs food > 6 |
 | equipment `FROST_WALKER` level | `Player::frost_walker` (last found, like upstream) | CalculationContext.java:116-127 | Frost walker level |
 | equipment `WATER_MOVEMENT_EFFICIENCY` attribute effect | `Player::water_movement_efficiency`; `None` is upstream's default multiplier 1, so water walking costs the same as land walking without Depth Strider (kept) | CalculationContext.java:134-148 | `waterWalkSpeed` |
-| `InventoryBehavior.hasGenericThrowaway()` | a `CalculationContext::new` argument until InventoryBehavior is ported (phase 4) | CalculationContext.java:103 | `hasThrowaway` |
+| `InventoryBehavior.hasGenericThrowaway()` | a `CalculationContext::new` argument; `CalculationContext::from_baritone` asks the `InventoryBehavior` | CalculationContext.java:103 | `hasThrowaway` |
+| `player.position()`, `xo`/`yo`/`zo`, `getDeltaMovement()`, `getYRot()`/`getXRot()`, `onGround()`, `horizontalCollision` | `position`, `old_position`, `delta_movement`, `y_rot`/`x_rot`, `on_ground`, `horizontal_collision` | execution throughout | `getEyePosition(1.0F)` interpolates from `old_position` |
+| `isCrouching()`, `getEyeHeight()`, `getEyeHeight(Pose.CROUCHING)`, `getBoundingBox()`, `isInWall()`, `isFallFlying()`, `isHandsBusy()` | `crouching`, `eye_height`, `crouching_eye_height`, `bounding_box`, `in_wall`, `fall_flying`, `hands_busy` | execution throughout | Read as the host sent them |
+| `setSprinting(false)`, `getAbilities().flying = false`, `setYRot`/`setXRot`, `getInventory().setSelectedSlot(i)`, `player.input = new PlayerMovementInput(...)` | `sprinting`, `flying`, `y_rot`/`x_rot`, `inventory.selected`, `baritone_input` | PathExecutor.java:238; Movement.java:124; LookBehavior.java:99-100,115-122; MH:662; InputOverrideHandler.java:98 | What Baritone changes; the host applies it |
+| `containerMenu != inventoryMenu`, `getItemBySlot(OFFHAND)`, `getLightLevelDependentMagicValue()` | `container_open`, `offhand`, `light_level_dependent_magic_value` | InventoryBehavior.java:64,208; Avoidance.java:77 | |
+| `instanceof Mob`, `Spider`, `ZombifiedPiglin` + `getLastHurtByMob() != null`, `Enderman` + `isCreepy()` | `Entity::mob`, `type_id` (spider, cave spider), `provoked`, `creepy` | Avoidance.java:76-79 | Mob avoidance |
+| `options.sensitivity()`, `options.autoJump()` | `Options::sensitivity`, `Options::auto_jump` | LookBehavior.java:305; PathingBehavior.java:246-250 | Mouse steps; no auto jump while pathing |
 
 ## Trait fields
 
-`crate::host::BlockState`, table version 2. Serialized as JSON with these names; enum values are
+`crate::host::BlockState`, table version 3. Serialized as JSON with these names; enum values are
 snake_case (`"nether_vine"`), `Option` fields are absent or `null` when unset, and every field except
 `name` and the three tri-states defaults to false / zero / empty. "(new)" marks fields the plan's
 trait table does not list.
@@ -246,12 +256,15 @@ trait table does not list.
 | `chest_like` | `bool` | Chest, trapped chest, ender chest |
 | `hardness` | `f32` | `getDestroySpeed(null, null)`; < 0 means unbreakable (also when it throws) |
 | `requires_tool` | `bool` | `requiresCorrectToolForDrops()` |
-| `collision_shape`, `outline_shape` | `Vec<Aabb>` | Aim points, raytrace, position checks. Computed at `BlockPos.ZERO` with no world, so position-offset shapes (flowers, bamboo) are at their zero offset |
+| `collision_shape`, `outline_shape` | `Vec<Aabb>` | Aim points, raytrace, position checks. Computed with no world and an empty collision context; a shape that moves with the block's `offset` is stored unmoved |
+| `interaction_shape` (new, v3) | `Vec<Aabb>` | `getInteractionShape`: only changes the face a raytrace reports (hopper, cauldrons, composter, scaffolding) |
+| `offset` (new, v3) | `Option<{type: xz\|xyz, max_horizontal, max_vertical, outline: bool, collision: bool}>` | The offset function (`offsetType` with the block's maximum offsets), and which shapes the block moves by it (short grass only draws offset) |
 
 Version 2 replaced the planned `harvest_tools` / `required_tier` with `tags` and the items' own tool
 rules, which reproduce `Tool.getMiningSpeed` exactly (swords, shears and tier denial rules included).
+Version 3 added what raytraces need: interaction shapes and position offsets.
 
-Not in version 2, added with the code that reads them:
+Not in version 3, added with the code that reads them:
 
 | Field | Type | Meaning | Phase |
 |---|---|---|---|

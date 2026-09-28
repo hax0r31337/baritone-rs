@@ -174,6 +174,13 @@ impl IPath for Path {
         &self.movements
     }
 
+    fn movements_mut(&mut self) -> &mut [Movement] {
+        if !self.verified {
+            panic!("Path not yet verified");
+        }
+        &mut self.movements
+    }
+
     fn positions(&self) -> &[BetterBlockPos] {
         &self.path
     }

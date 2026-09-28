@@ -1,17 +1,19 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/movements/MovementDiagonal.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
-//
-// Missing until phase 4: safeToCancel, updateState, sprint, prepared, toBreak, toWalkInto.
 
 use rustc_hash::FxHashSet;
 
-use crate::api::pathing::movement::COST_INF;
-use crate::api::utils::BetterBlockPos;
+use crate::Baritone;
+use crate::api::pathing::movement::{COST_INF, MovementStatus};
+use crate::api::utils::input::Input;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::java::max_f64;
 use crate::mc::Direction;
 use crate::pathing::movement::movement::MovementKind;
 use crate::pathing::movement::movement_helper as mh;
 use crate::pathing::movement::movements::{is_magma, is_soul_sand, is_water_block};
-use crate::pathing::movement::{CalculationContext, Movement};
+use crate::pathing::movement::{CalculationContext, Movement, MovementState};
+use crate::settings::settings;
+use crate::utils::BlockStateInterface;
 use crate::utils::pathing::MutableMoveResult;
 
 /// `Math.sqrt(2)`
@@ -279,5 +281,131 @@ impl MovementDiagonal {
         }
         res.x = dest_x;
         res.z = dest_z;
+    }
+
+    pub(crate) fn safe_to_cancel(m: &Movement, baritone: &Baritone) -> bool {
+        //too simple. backfill does not work after cornering with this
+        //return context.precomputedData.canWalkOn(ctx, ctx.playerFeet().down());
+        let ctx = &baritone.player_context;
+        let player = ctx.player();
+        let offset = 0.25;
+        let x = player.position.x;
+        let y = player.position.y - 1.0;
+        let z = player.position.z;
+        let (src, dest) = (m.src, m.dest);
+        //standard
+        if ctx.player_feet() == src {
+            return true;
+        }
+        //both corners are walkable
+        if mh::can_walk_on_ctx(ctx, BetterBlockPos::new(src.x, src.y - 1, dest.z))
+            && mh::can_walk_on_ctx(ctx, BetterBlockPos::new(dest.x, src.y - 1, src.z))
+        {
+            return true;
+        }
+        //we are in a likely unwalkable corner, check for a supporting block
+        if ctx.player_feet() == BetterBlockPos::new(src.x, src.y, dest.z)
+            || ctx.player_feet() == BetterBlockPos::new(dest.x, src.y, src.z)
+        {
+            return mh::can_walk_on_ctx(ctx, BetterBlockPos::from_f64(x + offset, y, z + offset))
+                || mh::can_walk_on_ctx(ctx, BetterBlockPos::from_f64(x + offset, y, z - offset))
+                || mh::can_walk_on_ctx(ctx, BetterBlockPos::from_f64(x - offset, y, z + offset))
+                || mh::can_walk_on_ctx(ctx, BetterBlockPos::from_f64(x - offset, y, z - offset));
+        }
+        true
+    }
+
+    pub(crate) fn update_state(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) {
+        m.update_state_default(baritone, state);
+        if state.get_status() != MovementStatus::Running {
+            return;
+        }
+
+        let (src, dest) = (m.src, m.dest);
+        if baritone.player_context.player_feet() == dest {
+            state.set_status(MovementStatus::Success);
+            return;
+        } else if !m.player_in_valid_position(baritone)
+            && !{
+                let ctx = &baritone.player_context;
+                mh::is_liquid_ctx(ctx, src)
+                    && m.get_valid_positions().contains(&ctx.player_feet().above())
+            }
+        {
+            state.set_status(MovementStatus::Unreachable);
+            return;
+        }
+        let ctx = &baritone.player_context;
+        if dest.y > src.y
+            && ctx.player().position.y < src.y as f64 + 0.1
+            && ctx.player().horizontal_collision
+        {
+            state.set_input(Input::Jump, true);
+        }
+        if Self::sprint(m, ctx) {
+            state.set_input(Input::Sprint, true);
+        }
+        state.set_input(
+            Input::Sneak,
+            settings().allow_walk_on_magma_blocks
+                && mh::stepping_on_blocks(ctx)
+                    .into_iter()
+                    .any(|block| is_magma(ctx.world().get_block_state(block))),
+        );
+        mh::move_towards(ctx, state, dest);
+    }
+
+    fn sprint(m: &Movement, ctx: &dyn IPlayerContext) -> bool {
+        if mh::is_liquid_ctx(ctx, ctx.player_feet()) && !settings().sprint_in_water {
+            return false;
+        }
+        for i in 0..4 {
+            if !mh::can_walk_through_ctx(ctx, m.positions_to_break[i]) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn prepared(
+        _m: &mut Movement,
+        _baritone: &mut Baritone,
+        _state: &mut MovementState,
+    ) -> bool {
+        true
+    }
+
+    pub(crate) fn to_break(m: &mut Movement, bsi: &BlockStateInterface) -> Vec<BetterBlockPos> {
+        if let Some(to_break_cached) = &m.to_break_cached {
+            return to_break_cached.clone();
+        }
+        let mut result = Vec::new();
+        for i in 4..6 {
+            let pos = m.positions_to_break[i];
+            if !mh::can_walk_through_bsi(bsi, pos.x, pos.y, pos.z) {
+                result.push(pos);
+            }
+        }
+        m.to_break_cached = Some(result.clone());
+        result
+    }
+
+    pub(crate) fn to_walk_into(m: &mut Movement, bsi: &BlockStateInterface) -> Vec<BetterBlockPos> {
+        if m.to_walk_into_cached.is_none() {
+            m.to_walk_into_cached = Some(Vec::new());
+        }
+        let mut result = Vec::new();
+        for i in 0..4 {
+            let pos = m.positions_to_break[i];
+            if !mh::can_walk_through_bsi(bsi, pos.x, pos.y, pos.z) {
+                result.push(pos);
+            }
+        }
+        m.to_walk_into_cached = Some(result.clone());
+        result
     }
 }

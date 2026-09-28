@@ -22,6 +22,9 @@ pub trait IPath: Send + Sync + fmt::Debug {
     /// movements.size() should equal positions.size()-1
     fn movements(&self) -> &[Movement];
 
+    /// The movements, for executing them (upstream's movements are mutable objects).
+    fn movements_mut(&mut self) -> &mut [Movement];
+
     /// All positions along the way.
     /// Should begin with the same as getSrc and end with the same as getDest
     fn positions(&self) -> &[BetterBlockPos];

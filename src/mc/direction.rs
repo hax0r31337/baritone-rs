@@ -187,6 +187,28 @@ impl Direction {
     pub fn by_name(name: &str) -> Option<Direction> {
         Self::VALUES.into_iter().find(|d| d.get_name() == name)
     }
+
+    /// `getApproximateNearest(double, double, double)`: computed in `float`.
+    pub fn get_approximate_nearest(dx: f64, dy: f64, dz: f64) -> Direction {
+        Self::get_approximate_nearest_f32(dx as f32, dy as f32, dz as f32)
+    }
+
+    /// `getApproximateNearest(float, float, float)`
+    pub fn get_approximate_nearest_f32(dx: f32, dy: f32, dz: f32) -> Direction {
+        let mut result = Direction::North;
+        // Float.MIN_VALUE, the smallest positive float
+        let mut highest_dot = f32::from_bits(1);
+        for direction in Self::VALUES {
+            let dot = dx * direction.get_step_x() as f32
+                + dy * direction.get_step_y() as f32
+                + dz * direction.get_step_z() as f32;
+            if dot > highest_dot {
+                highest_dot = dot;
+                result = direction;
+            }
+        }
+        result
+    }
 }
 
 impl fmt::Display for Direction {

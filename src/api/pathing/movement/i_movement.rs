@@ -1,7 +1,7 @@
 // Ported from baritone src/api/java/baritone/api/pathing/movement/IMovement.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Missing until phase 4: `update`, `reset`, `resetBlockCache` and `safeToCancel`, which belong
-// to execution.
+// `update`, `reset`, `resetBlockCache` and `safeToCancel` are `Movement`'s own methods: they
+// take the `Baritone` that runs the movement, which this trait does not know.
 
 use crate::api::utils::BetterBlockPos;
 

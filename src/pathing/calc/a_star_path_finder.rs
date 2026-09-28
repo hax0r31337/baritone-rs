@@ -15,7 +15,7 @@ use crate::api::utils::settings_util::maybe_censor;
 use crate::api::utils::{BetterBlockPos, PathCalculationResult};
 use crate::java::current_time_millis;
 use crate::pathing::calc::abstract_node_cost_search::{
-    COEFFICIENTS, MIN_DIST_PATH, MIN_IMPROVEMENT, dist_from_start_sq, node_at_position,
+    self, COEFFICIENTS, MIN_DIST_PATH, MIN_IMPROVEMENT, dist_from_start_sq, node_at_position,
 };
 use crate::pathing::calc::openset::{BinaryHeapOpenSet, IOpenSet};
 use crate::pathing::calc::{AbstractNodeCostSearch, Path};
@@ -71,6 +71,7 @@ impl AStarPathFinder {
             most_recent_considered,
             best_so_far,
             cancel_requested,
+            progress,
             ..
         } = search;
         let (start_x, start_y, start_z) = (*start_x, *start_y, *start_z);
@@ -138,6 +139,19 @@ impl AStarPathFinder {
             && num_empty_chunk < pathing_max_chunk_border_fetch
             && !cancel_requested.load(Ordering::Relaxed)
         {
+            // not upstream: answer another thread's bestPathSoFar()
+            progress.publish_if_requested(|| {
+                abstract_node_cost_search::best_so_far(
+                    *real_start,
+                    BetterBlockPos::new(start_x, start_y, start_z),
+                    Some(start_node),
+                    best_so_far,
+                    nodes,
+                    goal,
+                    false,
+                    0,
+                )
+            });
             if (num_nodes & (time_check_interval - 1)) == 0 {
                 // only call this once every 64 nodes (about half a millisecond)
                 let now = current_time_millis(); // since nanoTime is slow on windows (takes many microseconds)
@@ -517,5 +531,32 @@ mod tests {
         // "NanGoal calculated implausible heuristic NaN at 0 1 0" is caught
         assert_eq!(finder.calculate(1_000, 1_000).get_type(), Type::Exception);
         assert!(finder.is_finished());
+    }
+
+    #[test]
+    fn best_path_so_far_from_another_thread() {
+        let world = flat_world();
+        let mut finder = finder(&world, Arc::new(GoalXZ::new(10_000, 0)));
+        let handle = finder.search().handle();
+        let search = std::thread::spawn(move || {
+            finder.calculate(10_000, 10_000);
+            finder
+        });
+        // answered while the search runs (None while no node is MIN_DIST_PATH away), or with
+        // its final state
+        let first = handle.best_path_so_far();
+        let finder = search.join().unwrap();
+        let last = finder.search().best_path_so_far().unwrap();
+        assert!(first.map_or(0, |positions| positions.len()) <= last.positions().len());
+        assert_eq!(handle.best_path_so_far().as_deref(), Some(last.positions()));
+    }
+
+    #[test]
+    fn best_path_so_far_without_search() {
+        let world = flat_world();
+        let finder = finder(&world, Arc::new(GoalXZ::new(20, -7)));
+        let handle = finder.search().handle();
+        drop(finder);
+        assert!(handle.best_path_so_far().is_none());
     }
 }

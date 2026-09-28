@@ -1,14 +1,23 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/CalculationContext.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Built from what the host sends instead of `IBaritone`: a world snapshot and the player. The
-// `baritone` field is not kept, since movements no longer hold one. `hasGenericThrowaway()`
-// is passed in until `InventoryBehavior` is ported (phase 4). The active `ActionCosts` are
-// captured here, so a calculation keeps one set of costs throughout, like the settings below.
+// Built from what the host sends instead of `IBaritone`: a world snapshot and the player
+// (`new`), or the player context's (`from_baritone`). The `baritone` field is not kept, since
+// movements no longer hold one. The active `ActionCosts` are captured here, so a calculation
+// keeps one set of costs throughout, like the settings below.
+//
+// Upstream shares one context between the tick thread and the calculation it starts. The
+// port's `BlockStateInterface` and `ToolSet` caches are single-threaded, so the calculation
+// gets a clone: same snapshot and settings, its own caches, the same `PrecomputedData`.
+//
+// Upstream's `forUseOnAnotherThread` copy of the chunk map still sees block updates in the
+// chunks it copied; a snapshot does not. Processes rebuild their context every tick, so the
+// context execution reads is at most a tick old.
 
 use std::sync::Arc;
 
+use crate::Baritone;
 use crate::api::pathing::movement::{ActionCosts, COST_INF, action_costs};
-use crate::api::utils::BetterBlockPos;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::host::{BlockState, Inventory, Player, World};
 use crate::pathing::precompute::PrecomputedData;
 use crate::settings::settings;
@@ -16,8 +25,9 @@ use crate::utils::pathing::BetterWorldBorder;
 use crate::utils::{BlockStateInterface, ToolSet};
 
 /// `Items.WATER_BUCKET`
-const STACK_BUCKET_WATER: &str = "minecraft:water_bucket";
+pub(crate) const STACK_BUCKET_WATER: &str = "minecraft:water_bucket";
 
+#[derive(Clone)]
 pub struct CalculationContext {
     pub safe_for_threaded_use: bool,
     /// The world snapshot `bsi` reads (upstream: the live client world).
@@ -53,13 +63,29 @@ pub struct CalculationContext {
     pub allow_walk_on_magma_blocks: bool,
     pub world_border: BetterWorldBorder,
 
-    pub precomputed_data: PrecomputedData,
+    pub precomputed_data: Arc<PrecomputedData>,
 
     /// The `ActionCosts` constants, captured when the context is created.
     pub costs: Arc<ActionCosts>,
 }
 
 impl CalculationContext {
+    /// `CalculationContext(IBaritone)`
+    pub fn from_baritone(baritone: &Baritone) -> Self {
+        Self::from_baritone_thread(baritone, false)
+    }
+
+    /// `CalculationContext(IBaritone, boolean)`
+    pub fn from_baritone_thread(baritone: &Baritone, for_use_on_another_thread: bool) -> Self {
+        let ctx = &baritone.player_context;
+        Self::new(
+            Arc::clone(ctx.world()),
+            Arc::new(ctx.player().clone()),
+            baritone.inventory_behavior.has_generic_throwaway(ctx),
+            for_use_on_another_thread,
+        )
+    }
+
     /// `CalculationContext(IBaritone, boolean)`, with the world and player the host sent, and
     /// `InventoryBehavior.hasGenericThrowaway()`.
     pub fn new(
@@ -70,7 +96,7 @@ impl CalculationContext {
     ) -> Self {
         let settings = settings();
         let costs = Arc::clone(&action_costs());
-        let precomputed_data = PrecomputedData::new(world.table());
+        let precomputed_data = Arc::new(PrecomputedData::new(world.table()));
         let bsi = BlockStateInterface::new(Arc::clone(&world));
         let tool_set = ToolSet::new(Arc::clone(&player), Arc::clone(world.table()));
         let has_throwaway = settings.allow_place && has_generic_throwaway;

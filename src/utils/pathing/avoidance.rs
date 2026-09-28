@@ -1,11 +1,10 @@
 // Ported from baritone src/main/java/baritone/utils/pathing/Avoidance.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
-//
-// Missing until phase 4: `create(IPlayerContext)`, which reads the player's surroundings. Its
-// mob spawner half reads the chunk cache, which is not ported.
 
 use rustc_hash::FxHashMap;
 
-use crate::api::utils::BetterBlockPos;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
+use crate::host::Entity;
+use crate::settings::settings;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Avoidance {
@@ -72,6 +71,40 @@ impl Avoidance {
                 }
             }
         }
+    }
+
+    /// `create(IPlayerContext)`. The mob spawners come from the chunk cache, which is not
+    /// ported, so only mobs are avoided.
+    pub fn create(ctx: &dyn IPlayerContext) -> Vec<Avoidance> {
+        let settings = settings();
+        if !settings.avoidance {
+            return Vec::new();
+        }
+        let mut res = Vec::new();
+        let mob_coeff = settings.mob_avoidance_coefficient;
+        // mobSpawnerAvoidanceCoefficient: ctx.worldData().getCachedWorld().getLocationsOf("mob_spawner", ...)
+        if mob_coeff != 1.0 {
+            for entity in ctx.entities() {
+                if !entity.mob {
+                    continue;
+                }
+                if entity.is_spider() && ctx.player().light_level_dependent_magic_value >= 0.5 {
+                    continue;
+                }
+                if entity.type_id == Entity::ZOMBIFIED_PIGLIN && !entity.provoked {
+                    continue;
+                }
+                if entity.type_id == Entity::ENDERMAN && !entity.creepy {
+                    continue;
+                }
+                res.push(Avoidance::from_pos(
+                    entity.block_position(),
+                    mob_coeff,
+                    settings.mob_avoidance_radius,
+                ));
+            }
+        }
+        res
     }
 }
 

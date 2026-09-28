@@ -15,8 +15,8 @@ use crate::settings::settings;
 /// A cached list of the best tools on the hotbar for any block
 ///
 /// Owned by one thread at a time (`Send`, not `Sync`), like the calculation context it
-/// belongs to.
-#[derive(Debug)]
+/// belongs to. A clone starts with a copy of the cache.
+#[derive(Clone, Debug)]
 pub struct ToolSet {
     /// A cache mapping a `Block` (its default state id) to how long it will take to break
     /// with this toolset, given the optimum tool is used.

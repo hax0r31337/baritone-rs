@@ -1,19 +1,21 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/movements/MovementParkour.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Missing until phase 4: safeToCancel, updateState.
-
 use rustc_hash::FxHashSet;
 
-use crate::api::pathing::movement::COST_INF;
-use crate::api::utils::BetterBlockPos;
+use crate::Baritone;
+use crate::api::pathing::movement::{COST_INF, MovementStatus};
+use crate::api::utils::helper::log_debug;
+use crate::api::utils::input::Input;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::host::Fluid;
 use crate::mc::Direction;
 use crate::pathing::movement::movement::{
     HORIZONTALS_BUT_ALSO_DOWN_____SO_EVERY_DIRECTION_EXCEPT_UP, MovementKind,
 };
-use crate::pathing::movement::movement_helper as mh;
-use crate::pathing::movement::movements::{is_magma, is_soul_sand};
-use crate::pathing::movement::{CalculationContext, Movement};
+use crate::pathing::movement::movement_helper::{self as mh, PlaceResult};
+use crate::pathing::movement::movements::{is_ladder_or_vine, is_magma, is_soul_sand};
+use crate::pathing::movement::{CalculationContext, Movement, MovementState};
+use crate::settings::settings;
 use crate::utils::BlockStateInterface;
 use crate::utils::pathing::MutableMoveResult;
 
@@ -272,5 +274,93 @@ impl MovementParkour {
             }
         }
         set
+    }
+
+    pub(crate) fn safe_to_cancel(state: &MovementState) -> bool {
+        // once this movement is instantiated, the state is default to PREPPING
+        // but once it's ticked for the first time it changes to RUNNING
+        // since we don't really know anything about momentum, it suffices to say Parkour can only be canceled on the 0th tick
+        state.get_status() != MovementStatus::Running
+    }
+
+    pub(crate) fn update_state(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) {
+        m.update_state_default(baritone, state);
+        if state.get_status() != MovementStatus::Running {
+            return;
+        }
+        let MovementKind::Parkour(this) = &m.kind else {
+            unreachable!()
+        };
+        let (direction, dist, ascend) = (this.direction, this.dist, this.ascend);
+        let (src, dest) = (m.src, m.dest);
+        let ctx = &baritone.player_context;
+        if ctx.player_feet().y < src.y {
+            // we have fallen
+            log_debug("sorry");
+            state.set_status(MovementStatus::Unreachable);
+            return;
+        }
+        if dist >= 4 || ascend {
+            state.set_input(Input::Sprint, true);
+        }
+        if settings().allow_walk_on_magma_blocks
+            && is_magma(ctx.world().get_block_state(ctx.player_feet().below()))
+        {
+            state.set_input(Input::Sneak, true);
+        }
+
+        mh::move_towards(ctx, state, dest);
+        if ctx.player_feet() == dest {
+            let d = BlockStateInterface::get_block(ctx, dest);
+            if is_ladder_or_vine(d) {
+                // it physically hurt me to add support for parkour jumping onto a vine
+                // but i did it anyway
+                state.set_status(MovementStatus::Success);
+                return;
+            }
+            if ctx.player().position.y - (ctx.player_feet().y as f64) < 0.094 {
+                // lilypads
+                state.set_status(MovementStatus::Success);
+            }
+        } else if ctx.player_feet() != src {
+            if ctx.player_feet() == src.relative(direction)
+                || ctx.player().position.y - src.y as f64 > 0.0001
+            {
+                if settings().allow_place // see PR #3775
+                    && baritone.inventory_behavior.has_generic_throwaway(ctx)
+                    && !mh::can_walk_on_ctx(ctx, dest.below())
+                    && !ctx.player().on_ground
+                    && mh::attempt_to_place_a_block(state, baritone, dest.below(), true, false)
+                        == PlaceResult::ReadyToPlace
+                {
+                    // go in the opposite order to check DOWN before all horizontals -- down is preferable because you don't have to look to the side while in midair, which could mess up the trajectory
+                    state.set_input(Input::ClickRight, true);
+                }
+                // prevent jumping too late by checking for ascend
+                if dist == 3 && !ascend {
+                    // this is a 2 block gap, dest = src + direction * 3
+                    let position = baritone.player_context.player().position;
+                    let x_diff = (src.x as f64 + 0.5) - position.x;
+                    let z_diff = (src.z as f64 + 0.5) - position.z;
+                    let dist_from_start = crate::java::max_f64(x_diff.abs(), z_diff.abs());
+                    if dist_from_start < 0.7 {
+                        return;
+                    }
+                }
+
+                state.set_input(Input::Jump, true);
+            } else if ctx.player_feet() != dest.relative_n(direction, -1) {
+                state.set_input(Input::Sprint, false);
+                if ctx.player_feet() == src.relative_n(direction, -1) {
+                    mh::move_towards(ctx, state, src);
+                } else {
+                    mh::move_towards(ctx, state, src.relative_n(direction, -1));
+                }
+            }
+        }
     }
 }

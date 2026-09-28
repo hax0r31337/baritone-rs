@@ -16,7 +16,8 @@ use rustc_hash::FxHashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::mc::{Aabb, Direction};
+use crate::api::utils::BetterBlockPos;
+use crate::mc::{Aabb, Direction, Vec3, VoxelShape, mth};
 use crate::pathing::precompute::Ternary;
 
 /// The fluid in a block state, waterlogging and bubble columns included.
@@ -78,6 +79,59 @@ pub enum Openable {
     Door,
     FenceGate,
     TrapDoor,
+}
+
+/// `BlockBehaviour.OffsetType`, without `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OffsetType {
+    Xz,
+    Xyz,
+}
+
+/// A block whose shapes move with its position (flowers, bamboo, pointed dripstone):
+/// `BlockBehaviour.Properties.offsetType` with the block's `getMaxHorizontalOffset()` and
+/// `getMaxVerticalOffset()`, and which of its shapes the block moves by it
+/// (`shape.move(state.getOffset(pos))`). Some blocks are only drawn offset (short grass).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockOffset {
+    #[serde(rename = "type")]
+    pub offset_type: OffsetType,
+    pub max_horizontal: f32,
+    pub max_vertical: f32,
+    /// The outline shape moves.
+    #[serde(default)]
+    pub outline: bool,
+    /// The collision shape moves.
+    #[serde(default)]
+    pub collision: bool,
+}
+
+impl BlockOffset {
+    /// The offset function `offsetType` installs, evaluated at `pos`.
+    pub fn evaluate(&self, pos: BetterBlockPos) -> Vec3 {
+        let seed = mth::get_seed(pos.x, 0, pos.z);
+        let max_horizontal_offset = self.max_horizontal as f64;
+        let x = mth::clamp(
+            (((seed & 15) as f32 / 15.0f32) as f64 - 0.5) * 0.5,
+            -max_horizontal_offset,
+            max_horizontal_offset,
+        );
+        let z = mth::clamp(
+            (((seed >> 8 & 15) as f32 / 15.0f32) as f64 - 0.5) * 0.5,
+            -max_horizontal_offset,
+            max_horizontal_offset,
+        );
+        match self.offset_type {
+            OffsetType::Xz => Vec3::new(x, 0.0, z),
+            OffsetType::Xyz => {
+                let y =
+                    (((seed >> 4 & 15) as f32 / 15.0f32) as f64 - 1.0) * self.max_vertical as f64;
+                Vec3::new(x, y, z)
+            }
+        }
+    }
 }
 
 /// Blocks that change the player's speed.
@@ -225,6 +279,14 @@ pub struct BlockState {
     /// Outline (selection) boxes, relative to the block's origin.
     #[serde(default)]
     pub outline_shape: Vec<Aabb>,
+    /// `getInteractionShape`: boxes that only change the face a raytrace reports (hopper,
+    /// cauldron, composter, scaffolding).
+    #[serde(default)]
+    pub interaction_shape: Vec<Aabb>,
+    /// The block's offset (`getOffset`), and which of the shapes above move with it; those
+    /// are stored unmoved.
+    #[serde(default)]
+    pub offset: Option<BlockOffset>,
 }
 
 impl Default for BlockState {
@@ -274,7 +336,42 @@ impl Default for BlockState {
             requires_tool: false,
             collision_shape: Vec::new(),
             outline_shape: Vec::new(),
+            interaction_shape: Vec::new(),
+            offset: None,
         }
+    }
+}
+
+impl BlockState {
+    /// `getOffset(BlockPos)`: zero for blocks without an offset.
+    pub fn get_offset(&self, pos: BetterBlockPos) -> Vec3 {
+        match &self.offset {
+            Some(offset) => offset.evaluate(pos),
+            None => Vec3::ZERO,
+        }
+    }
+
+    /// `getShape(BlockGetter, BlockPos)`: the outline shape at `pos`.
+    pub fn get_shape(&self, pos: BetterBlockPos) -> VoxelShape<'_> {
+        let offset = self
+            .offset
+            .filter(|offset| offset.outline)
+            .map(|offset| offset.evaluate(pos));
+        VoxelShape::new(&self.outline_shape, offset)
+    }
+
+    /// `getCollisionShape(BlockGetter, BlockPos)`
+    pub fn get_collision_shape(&self, pos: BetterBlockPos) -> VoxelShape<'_> {
+        let offset = self
+            .offset
+            .filter(|offset| offset.collision)
+            .map(|offset| offset.evaluate(pos));
+        VoxelShape::new(&self.collision_shape, offset)
+    }
+
+    /// `getInteractionShape(BlockGetter, BlockPos)`: never moved.
+    pub fn get_interaction_shape(&self, _pos: BetterBlockPos) -> VoxelShape<'_> {
+        VoxelShape::new(&self.interaction_shape, None)
     }
 }
 
@@ -313,7 +410,7 @@ impl std::error::Error for TableError {}
 
 /// All block states, indexed by host state id. Replaces `Block.BLOCK_STATE_REGISTRY`.
 ///
-/// Serialized as `{"version": 1, "air": <id>, "states": [...]}`.
+/// Serialized as `{"version": 3, "air": <id>, "states": [...]}`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "TableData")]
 pub struct BlockStateTable {
@@ -345,7 +442,7 @@ impl TryFrom<TableData> for BlockStateTable {
 
 impl BlockStateTable {
     /// Bumped whenever a field is added or changes meaning.
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     /// Builds the table; `states[i]` gets id `i`. `air` is the state returned for unloaded
     /// chunks, empty sections and positions outside the world's height (`Blocks.AIR`).
@@ -416,6 +513,14 @@ impl BlockStateTable {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &BlockState> {
         self.states.iter()
+    }
+
+    /// `Blocks.X.defaultBlockState()` for the block named `name`, if the table has it.
+    pub fn get_default_state(&self, name: &str) -> Option<&BlockState> {
+        self.states
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| self.get(s.default_state))
     }
 }
 
@@ -506,7 +611,7 @@ mod tests {
     #[test]
     fn deserialize() {
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "air": 0,
             "states": [
                 {"name": "minecraft:air", "air": true, "can_walk_on": "no",
@@ -533,7 +638,7 @@ mod tests {
         assert_eq!(slab.default_state, 1);
         assert_eq!(slab.tags, ["minecraft:mineable/axe", "minecraft:slabs"]);
 
-        let wrong_version = json.replace("\"version\": 2", "\"version\": 1");
+        let wrong_version = json.replace("\"version\": 3", "\"version\": 2");
         assert!(serde_json::from_str::<BlockStateTable>(&wrong_version).is_err());
         let unknown_field = json.replace("\"air\": true", "\"air\": true, \"airy\": true");
         assert!(serde_json::from_str::<BlockStateTable>(&unknown_field).is_err());

@@ -168,6 +168,35 @@ impl BetterBlockPos {
         }
     }
 
+    /// `BlockPos.offset(Vec3i)`, inherited from Minecraft's `BlockPos`.
+    pub fn offset(self, other: BetterBlockPos) -> Self {
+        self.offset_xyz(other.x, other.y, other.z)
+    }
+
+    /// `BlockPos.offset(int, int, int)`, inherited from Minecraft's `BlockPos`.
+    pub fn offset_xyz(self, x: i32, y: i32, z: i32) -> Self {
+        Self::new(
+            self.x.wrapping_add(x),
+            self.y.wrapping_add(y),
+            self.z.wrapping_add(z),
+        )
+    }
+
+    /// `BlockPos.cross(Vec3i)`, inherited from Minecraft's `BlockPos`.
+    pub fn cross(self, other: BetterBlockPos) -> Self {
+        Self::new(
+            self.y
+                .wrapping_mul(other.z)
+                .wrapping_sub(self.z.wrapping_mul(other.y)),
+            self.z
+                .wrapping_mul(other.x)
+                .wrapping_sub(self.x.wrapping_mul(other.z)),
+            self.x
+                .wrapping_mul(other.y)
+                .wrapping_sub(self.y.wrapping_mul(other.x)),
+        )
+    }
+
     /// `BlockPos.subtract(Vec3i)`, inherited from Minecraft's `BlockPos`.
     pub fn subtract(self, other: BetterBlockPos) -> Self {
         Self::new(

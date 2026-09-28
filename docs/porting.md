@@ -111,12 +111,57 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 - `CalculationContext` is built from the world snapshot and the host's `Player`; it captures the
   `ActionCosts` (`context.costs`), which movements read instead of `action_costs()`.
 
+## Execution
+
+- `IBaritone` is `crate::Baritone`, which owns what upstream's `Baritone` wires together: the
+  player context, the behaviors, the pathing control manager and the processes. Code that
+  reaches through `baritone.getX()` takes `baritone: &mut Baritone` and uses its fields
+  (`baritone.look_behavior`, `baritone.player_context`), so borrows split per field. Methods of
+  a component that reach other components are associated functions taking the `Baritone`
+  (`PathingBehavior::on_tick(baritone, ...)`, `InventoryBehavior::throwaway(baritone, ...)`).
+- `Behavior`'s `baritone`/`ctx` fields are not ported; behaviors, movements and the path
+  executor get the `Baritone` (or the context) passed in.
+- `IPlayerContext` is a trait with upstream's default methods, implemented by
+  `BaritonePlayerContext`, which holds the player, world, entities and options the host sent.
+  `ctx.minecraft().options` is `options()`. `LookBehavior.serverRotation` lives in the context,
+  which is what reads it.
+- The client's objects that upstream changes (the player's selected slot, sprinting, flying,
+  rotation, movement input) are fields of `crate::host::Player`; the host applies what changed.
+  `player.input = new PlayerMovementInput(...)` is `player.baritone_input = true`.
+- `IPlayerController` is implemented by the host. Its methods get the player and world the
+  client would change; `ctx.player_controller()` hands out a `PlayerController` that supplies
+  them, so call sites keep upstream's shape. Client actions upstream reaches elsewhere
+  (`LocalPlayer.swing`, `ClientLevel.disconnect`, the `IPlayerControllerMP` accessor) are
+  methods of the controller too.
+- Game events are methods of `Baritone` (`on_tick`, `on_player_update`, ...), dispatched by
+  `GameEventHandler` to the fixed listeners in upstream's registration order. Path events,
+  which only outside listeners receive, are queued for the host (`take_path_events`).
+- Processes (`IBaritoneProcess`) are trait objects in `Baritone::processes`, in registration
+  order (upstream's `HashSet` order is unspecified). The pathing control manager refers to them
+  by index; a process runs `on_tick` / `on_lost_control` taken out of the `Baritone`
+  (`Baritone::with_process`). Typed access downcasts (`get_custom_goal_process_mut`).
+- `Movement.updateState(state)` changes the state in place (`update_state(baritone, &mut
+  state)`); a subclass's `super.updateState` / `super.prepared` is `update_state_default` /
+  `prepared_default`. `instanceof MovementX` on movements is a match on `MovementKind`.
+- `synchronized (lock)` is a Java monitor, `crate::java::ReentrantMutex`, with the guarded data
+  in a `RefCell` (`PathingBehavior`'s `pathPlanLock`); `Thread.holdsLock` is
+  `is_held_by_current_thread`. Volatile fields shared with other threads are behind a plain
+  `Mutex` that is only held for the access.
+- The tick thread reads a running search through a `SearchHandle` (start, goal, cancel, best
+  path so far). Its `best_path_so_far` asks the search and blocks until the search answers,
+  before it expands its next node (or with its final state once `calculate0` returned).
+  A calculation gets a clone of the `CalculationContext` (same snapshot and `PrecomputedData`,
+  its own caches), where upstream shares one object between threads.
+- Randomness that upstream seeds from the clock (`ForkableRandom`, `new Random()`) keeps doing
+  so; `Baritone::with_look_random` seeds the look behavior for reproducible runs.
+
 ## Verification
 
 `tools/refgen/run.sh` compiles the real upstream classes against the real 26.3 client jar. The
 classes under test are listed in `SOURCES`; javac compiles whatever else they reference from
 upstream's source tree (`-sourcepath`). Only `BaritoneAPI` is stubbed, because the real one reads
-the settings file and boots the Baritone provider; `Settings` is the real class. `RefGen`
+the settings file and boots the Baritone provider; `Settings` is the real class, and the
+provider is whatever `ExecRefGen` installs. `RefGen`
 bootstraps the Minecraft registries, binds the block and item tags from the jar's data pack and
 binds the item components (from datagen's vanilla registries), so block and item checks behave
 as in game. `Bootstrap` redirects `System.out`/`System.err` into log4j, which has no provider
@@ -146,11 +191,29 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   way and its fields are set with the expressions of upstream's constructor, and `PathRefGen`
   fails if upstream adds a field it does not set. Timeouts are large enough that results do not
   depend on speed; `a_star_path_finder.rs` unit tests cover timeouts and cancellation.
+- `tests/fixtures/reference/exec.json.gz`: execution, tick by tick (`ExecRefGen`). The real
+  upstream `Baritone` (allocated without its constructor and wired with the real behaviors,
+  `PathingControlManager`, `CustomGoalProcess` and `InventoryPauserProcess`) runs against
+  stand-in client objects (`Minecraft`, `ClientLevel` with its chunk cache, `LocalPlayer`,
+  `MultiPlayerGameMode`, `Options`) and a simulated client: simplified movement (input,
+  jumping, friction, gravity, collision with block shapes, sneaking at edges, climbing) and a
+  simplified game mode (break progress from `ToolSet`, placing throwaways, opening doors,
+  inventory swaps). `tests/common/sim.rs` is the same simulation around the port; the two are
+  kept in sync operation for operation. A tick holds `pathPlanLock`, then waits for a running
+  calculation, then applies the blocks broken and placed, so nothing races. Scenarios cover
+  every movement, breaking, bridging, pillaring, ladders, doors and gates, segments planned
+  ahead with and without splicing, world changes and teleports mid-path, failed calculations,
+  the loaded-chunk edge, inventory swaps and pauses, and random terrain. Every tick's player
+  state (bit for bit), forced inputs, game mode calls, path events and path position are
+  recorded. The fixture also holds raytraces (`Level.clip`), block centers and
+  `RotationUtils.reachable` / `playerFeet` / `pathStart` samples in a world of assorted shapes.
+  `tests/execution.rs` runs the port alone through scenarios and checks that it arrives.
 
 `tests/reference_*.rs` replay the fixtures and compare floats bit for bit.
 
 To cover a newly ported class: add its upstream source to `SOURCES` in `run.sh`, add a section
-to `RefGen.java`, `BlockRefGen.java` or `PathRefGen.java`, regenerate, and add a replay test. Upstream code that
+to `RefGen.java`, `BlockRefGen.java`, `PathRefGen.java` or `ExecRefGen.java` (a scenario, when
+it runs during execution), regenerate, and add a replay test. Upstream code that
 cannot run standalone may be copied into `RefGen.java` verbatim (see the `RotationUtils`
 region). Regenerate after every upstream sync; the replay tests fail if the fixture's commit
 differs from `UPSTREAM`.

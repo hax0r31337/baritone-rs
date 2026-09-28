@@ -12,7 +12,11 @@ use std::fmt::Write;
 use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use baritone::host::{BlockState, BlockStateTable, Chunk, DimensionType, World, WorldBorder};
+use baritone::api::utils::BetterBlockPos;
+use baritone::host::{
+    BlockState, BlockStateTable, Chunk, DimensionType, OffsetType, World, WorldBorder,
+};
+use baritone::mc::Aabb;
 use baritone::pathing::movement::movement_helper as mh;
 use baritone::pathing::precompute::{PrecomputedData, Ternary};
 use baritone::settings::{Settings, set_settings};
@@ -25,9 +29,21 @@ struct Fixture {
     upstream: String,
     minecraft: String,
     table: BlockStateTable,
+    offsets: Vec<OffsetSample>,
     configs: BTreeMap<String, Settings>,
     state_refs: BTreeMap<String, Vec<String>>,
     worlds: Vec<FixtureWorld>,
+}
+
+/// A state with an offset at a position: `getOffset(pos)` and the moved shapes (`toAabbs()`),
+/// as raw double bits.
+#[derive(Deserialize)]
+struct OffsetSample {
+    state: u32,
+    pos: [i32; 3],
+    offset: [i64; 3],
+    outline: Vec<i64>,
+    collision: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +202,79 @@ fn java_table() {
     for (i, state) in table.iter().enumerate() {
         assert_eq!(state.id as usize, i);
     }
+}
+
+#[test]
+fn offsets_and_moved_shapes_match_upstream() {
+    let bits = |boxes: &mut dyn Iterator<Item = Aabb>| -> Vec<i64> {
+        boxes
+            .flat_map(<[f64; 6]>::from)
+            .map(|d| d.to_bits() as i64)
+            .collect()
+    };
+    let mut mismatches = Vec::new();
+    let mut offset_states = std::collections::BTreeSet::new();
+    for sample in &FIXTURE.offsets {
+        let state = TABLE.get(sample.state);
+        let pos = BetterBlockPos::new(sample.pos[0], sample.pos[1], sample.pos[2]);
+        offset_states.insert(state.name.as_str());
+        let offset = state.get_offset(pos);
+        let got = [offset.x, offset.y, offset.z].map(|d| d.to_bits() as i64);
+        if got != sample.offset {
+            mismatches.push(format!("getOffset({pos}) of {}", describe(state)));
+        }
+        if bits(&mut state.get_shape(pos).to_aabbs()) != sample.outline {
+            mismatches.push(format!("getShape({pos}) of {}", describe(state)));
+        }
+        if bits(&mut state.get_collision_shape(pos).to_aabbs()) != sample.collision {
+            mismatches.push(format!("getCollisionShape({pos}) of {}", describe(state)));
+        }
+    }
+    assert_no_mismatches(&mismatches, FIXTURE.offsets.len() * 3);
+    // flowers (XZ), bamboo and pointed dripstone (smaller offsets, collision moves too), an
+    // XYZ block, and one that is only drawn offset
+    for name in [
+        "minecraft:poppy",
+        "minecraft:bamboo",
+        "minecraft:pointed_dripstone",
+        "minecraft:small_dripleaf",
+        "minecraft:short_grass",
+    ] {
+        assert!(offset_states.contains(name), "{name} has no offset");
+    }
+    let offset_of = |name: &str| {
+        TABLE
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.offset)
+            .unwrap()
+    };
+    assert_eq!(
+        offset_of("minecraft:small_dripleaf").offset_type,
+        OffsetType::Xyz
+    );
+    assert!(offset_of("minecraft:poppy").outline && !offset_of("minecraft:poppy").collision);
+    assert!(offset_of("minecraft:bamboo").collision);
+    assert!(!offset_of("minecraft:short_grass").outline);
+    // interaction shapes: hopper, cauldron, composter, scaffolding
+    let with_interaction: std::collections::BTreeSet<_> = TABLE
+        .iter()
+        .filter(|s| !s.interaction_shape.is_empty())
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        with_interaction,
+        [
+            "minecraft:cauldron",
+            "minecraft:composter",
+            "minecraft:hopper",
+            "minecraft:lava_cauldron",
+            "minecraft:powder_snow_cauldron",
+            "minecraft:scaffolding",
+            "minecraft:water_cauldron",
+        ]
+        .into()
+    );
 }
 
 #[test]

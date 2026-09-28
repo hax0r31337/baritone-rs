@@ -59,6 +59,10 @@ impl IPath for CutoffPath {
         &self.movements
     }
 
+    fn movements_mut(&mut self) -> &mut [Movement] {
+        &mut self.movements
+    }
+
     fn positions(&self) -> &[BetterBlockPos] {
         &self.path
     }

@@ -1,14 +1,19 @@
-//! The local player as the host describes it: inventory, effects, and the equipment data path
-//! calculation reads.
+//! The local player as the host describes it: inventory, effects, the equipment data path
+//! calculation reads, and the entity state execution reads.
 //!
 //! Stands in for Minecraft's `LocalPlayer`, `Inventory` and `ItemStack` in ported code. Items
 //! carry what upstream asks of them (tool rules, tags, damage); the host computes enchantment
-//! effects, because enchantments are data driven. Position, rotation and movement state come
-//! with the execution code (phase 4).
+//! effects, because enchantments are data driven.
+//!
+//! The host sends the player every tick. Upstream also writes to the client's player (the
+//! selected slot, sprinting, flying, the rotation, the movement input); the port writes to its
+//! copy, and the host applies what changed (see `crate::Baritone`).
 
 use serde::{Deserialize, Serialize};
 
 use super::BlockState;
+use crate::api::utils::BetterBlockPos;
+use crate::mc::{Aabb, Vec3};
 
 /// `HolderSet<Block>`: the blocks a tool rule applies to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +100,9 @@ pub struct ItemStack {
     pub mining_efficiency: Option<f32>,
     /// Enchanted with Silk Touch at a level above 0.
     pub silk_touch: bool,
+    /// The stack's components differ from its item's defaults (renamed, enchanted, damaged,
+    /// ...). `findSlotMatchingItem` skips such stacks.
+    pub components_changed: bool,
 }
 
 impl Default for ItemStack {
@@ -118,6 +126,7 @@ impl ItemStack {
             tags: Vec::new(),
             mining_efficiency: None,
             silk_touch: false,
+            components_changed: false,
         }
     }
 
@@ -141,10 +150,15 @@ impl ItemStack {
 
     /// `getItem() == item`
     pub fn is_item(&self, name: &str) -> bool {
+        self.get_item() == name
+    }
+
+    /// `getItem()`: the item id, air for an empty stack.
+    pub fn get_item(&self) -> &str {
         if self.is_empty() {
-            name == Self::AIR
+            Self::AIR
         } else {
-            self.name == name
+            &self.name
         }
     }
 
@@ -206,14 +220,41 @@ impl Inventory {
         self.selected
     }
 
+    /// `setSelectedSlot(int)`: panics outside the hotbar, like upstream's
+    /// `IllegalArgumentException`.
+    pub fn set_selected_slot(&mut self, slot: i32) {
+        if !Self::is_hotbar_slot(slot) {
+            panic!("Invalid selected slot");
+        }
+        self.selected = slot;
+    }
+
+    /// `getNonEquipmentItems().get(int)`: panics outside the 36 main slots, like upstream's
+    /// `IndexOutOfBoundsException`.
+    pub fn get_non_equipment_item(&self, slot: i32) -> &ItemStack {
+        if !(0..Self::INVENTORY_SIZE).contains(&slot) {
+            panic!("IndexOutOfBoundsException: {slot}");
+        }
+        self.get_item(slot)
+    }
+
+    /// Swaps two main slots, what a `ContainerInput.SWAP` window click between a main slot and
+    /// a hotbar slot does to the inventory.
+    pub fn swap(&mut self, a: i32, b: i32) {
+        let size = a.max(b) as usize + 1;
+        if self.items.len() < size {
+            self.items.resize(size, ItemStack::empty());
+        }
+        self.items.swap(a as usize, b as usize);
+    }
+
     /// `Inventory.isHotbarSlot(int)`
     pub fn is_hotbar_slot(slot: i32) -> bool {
         (0..Self::SELECTION_SIZE).contains(&slot)
     }
 
-    /// `findSlotMatchingItem(ItemStack)`: first non-empty main slot with the same item, or -1.
-    /// Upstream also compares components; ported code only looks for plain items (a water
-    /// bucket), so the port compares the item id.
+    /// `findSlotMatchingItem(new ItemStack(item))`: first non-empty main slot holding `name`
+    /// with its default components (`isSameItemSameComponents`), or -1.
     pub fn find_slot_matching_item(&self, name: &str) -> i32 {
         for (i, item) in self
             .items
@@ -221,7 +262,7 @@ impl Inventory {
             .take(Self::INVENTORY_SIZE as usize)
             .enumerate()
         {
-            if !item.is_empty() && item.name == name {
+            if !item.is_empty() && item.name == name && !item.components_changed {
                 return i as i32;
             }
         }
@@ -238,10 +279,65 @@ pub struct MobEffectInstance {
     pub amplifier: i32,
 }
 
+/// `InteractionHand`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionHand {
+    MainHand,
+    OffHand,
+}
+
+impl InteractionHand {
+    /// `InteractionHand.values()`
+    pub const VALUES: [InteractionHand; 2] = [InteractionHand::MainHand, InteractionHand::OffHand];
+}
+
 /// The local player (`LocalPlayer`), as far as ported code reads it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Player {
+    /// `position()`
+    pub position: Vec3,
+    /// `xo`, `yo`, `zo`: the position at the end of the previous tick, which
+    /// `getEyePosition(1.0F)` interpolates from.
+    pub old_position: Vec3,
+    /// `getDeltaMovement()`
+    pub delta_movement: Vec3,
+    /// `getYRot()`, the yaw. Baritone sets it while it looks somewhere (`LookBehavior`).
+    pub y_rot: f32,
+    /// `getXRot()`, the pitch.
+    pub x_rot: f32,
+    /// `onGround()`
+    pub on_ground: bool,
+    /// `horizontalCollision`: the last move was stopped by a wall.
+    pub horizontal_collision: bool,
+    /// `isCrouching()`: in the crouching pose.
+    pub crouching: bool,
+    /// `getEyeHeight()`, for the current pose.
+    pub eye_height: f32,
+    /// `getEyeHeight(Pose.CROUCHING)`
+    pub crouching_eye_height: f32,
+    /// `getBoundingBox()`
+    pub bounding_box: Aabb,
+    /// `isInWall()`: the eyes are inside a suffocating block.
+    pub in_wall: bool,
+    /// `isFallFlying()`
+    pub fall_flying: bool,
+    /// `isSprinting()`. Baritone clears it (`setSprinting(false)`).
+    pub sprinting: bool,
+    /// `getAbilities().flying`. Baritone clears it while it moves.
+    pub flying: bool,
+    /// `isHandsBusy()`
+    pub hands_busy: bool,
+    /// `containerMenu != inventoryMenu`: a container (chest, crafting table, ...) is open.
+    pub container_open: bool,
+    /// `getLightLevelDependentMagicValue()`
+    pub light_level_dependent_magic_value: f32,
+    /// `input instanceof PlayerMovementInput`: the client takes its movement input from
+    /// Baritone (`InputOverrideHandler`) instead of the keyboard. Baritone sets it.
+    pub baritone_input: bool,
+    /// `getItemBySlot(EquipmentSlot.OFFHAND)`
+    pub offhand: ItemStack,
     pub inventory: Inventory,
     /// `getFoodData().getFoodLevel()`
     pub food_level: i32,
@@ -258,8 +354,29 @@ pub struct Player {
 }
 
 impl Default for Player {
+    /// A standing player at the origin with an empty inventory.
     fn default() -> Self {
         Self {
+            position: Vec3::ZERO,
+            old_position: Vec3::ZERO,
+            delta_movement: Vec3::ZERO,
+            y_rot: 0.0,
+            x_rot: 0.0,
+            on_ground: true,
+            horizontal_collision: false,
+            crouching: false,
+            eye_height: Self::STANDING_EYE_HEIGHT,
+            crouching_eye_height: Self::CROUCHING_EYE_HEIGHT,
+            bounding_box: Self::standing_box(Vec3::ZERO),
+            in_wall: false,
+            fall_flying: false,
+            sprinting: false,
+            flying: false,
+            hands_busy: false,
+            container_open: false,
+            light_level_dependent_magic_value: 0.0,
+            baritone_input: false,
+            offhand: ItemStack::empty(),
             inventory: Inventory::default(),
             food_level: 20,
             effects: Vec::new(),
@@ -272,6 +389,73 @@ impl Default for Player {
 impl Player {
     pub const HASTE: &str = "minecraft:haste";
     pub const MINING_FATIGUE: &str = "minecraft:mining_fatigue";
+
+    /// The player's standing eye height (`EntityDimensions.eyeHeight` of `Pose.STANDING`).
+    pub const STANDING_EYE_HEIGHT: f32 = 1.62;
+    /// The player's crouching eye height.
+    pub const CROUCHING_EYE_HEIGHT: f32 = 1.27;
+
+    /// The standing player's box (0.6 wide, 1.8 high) with its feet at `position`
+    /// (`EntityDimensions.makeBoundingBox`).
+    pub fn standing_box(position: Vec3) -> Aabb {
+        let w = (0.6f32 / 2.0f32) as f64;
+        let h = 1.8f32 as f64;
+        Aabb::new(
+            position.x - w,
+            position.y,
+            position.z - w,
+            position.x + w,
+            position.y + h,
+            position.z + w,
+        )
+    }
+
+    /// `getX()`
+    pub fn get_x(&self) -> f64 {
+        self.position.x
+    }
+
+    /// `getY()`
+    pub fn get_y(&self) -> f64 {
+        self.position.y
+    }
+
+    /// `getZ()`
+    pub fn get_z(&self) -> f64 {
+        self.position.z
+    }
+
+    /// `blockPosition()`: `BlockPos.containing(position())`.
+    pub fn block_position(&self) -> BetterBlockPos {
+        BetterBlockPos::from_f64(self.position.x, self.position.y, self.position.z)
+    }
+
+    /// `getEyePosition()`
+    pub fn get_eye_position(&self) -> Vec3 {
+        Vec3::new(
+            self.position.x,
+            self.position.y + self.eye_height as f64,
+            self.position.z,
+        )
+    }
+
+    /// `getEyePosition(float)`
+    pub fn get_eye_position_partial(&self, partial_tick_time: f32) -> Vec3 {
+        let a = partial_tick_time as f64;
+        Vec3::new(
+            crate::mc::mth::lerp(a, self.old_position.x, self.position.x),
+            crate::mc::mth::lerp(a, self.old_position.y, self.position.y) + self.eye_height as f64,
+            crate::mc::mth::lerp(a, self.old_position.z, self.position.z),
+        )
+    }
+
+    /// `getItemInHand(InteractionHand)`
+    pub fn get_item_in_hand(&self, hand: InteractionHand) -> &ItemStack {
+        match hand {
+            InteractionHand::MainHand => self.inventory.get_item(self.inventory.selected),
+            InteractionHand::OffHand => &self.offhand,
+        }
+    }
 
     /// `getInventory()`
     pub fn get_inventory(&self) -> &Inventory {
@@ -380,7 +564,12 @@ mod tests {
         inv.items[20] = ItemStack::of("minecraft:water_bucket");
         assert_eq!(inv.find_slot_matching_item("minecraft:water_bucket"), 20);
         assert!(!Inventory::is_hotbar_slot(20));
-        inv.items[4] = ItemStack::of("minecraft:water_bucket");
+        inv.items[4] = ItemStack {
+            components_changed: true,
+            ..ItemStack::of("minecraft:water_bucket")
+        };
+        assert_eq!(inv.find_slot_matching_item("minecraft:water_bucket"), 20);
+        inv.items[4].components_changed = false;
         assert_eq!(inv.find_slot_matching_item("minecraft:water_bucket"), 4);
         assert!(Inventory::is_hotbar_slot(4));
         assert!(!Inventory::is_hotbar_slot(-1));

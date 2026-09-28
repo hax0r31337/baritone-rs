@@ -14,8 +14,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::block_state::BlockStateTable;
+use super::block_state::{BlockState, BlockStateTable};
 use super::paletted::{self, PalettedStorage};
+use crate::api::utils::BetterBlockPos;
+use crate::mc::{BlockHitResult, Direction, Vec3, VoxelShape, block_getter};
 
 /// `ChunkPos.pack(x, z)`: the chunk map key.
 #[inline]
@@ -312,6 +314,70 @@ impl World {
         };
         Arc::make_mut(section).set(x, y, z, id);
         Ok(true)
+    }
+
+    /// `Level.getBlockState(BlockPos)`: air above and below the world and in unloaded chunks.
+    /// The client returns void air there, which has the same traits.
+    pub fn get_block_state(&self, pos: BetterBlockPos) -> &BlockState {
+        let y = pos.y.wrapping_sub(self.dimension.min_y);
+        if y < 0 || y >= self.dimension.height {
+            return self.table.air();
+        }
+        match self
+            .get_chunk(pos.x >> 4, pos.z >> 4)
+            .and_then(|chunk| chunk.section((y >> 4) as usize))
+        {
+            Some(section) => self.table.get(section.get(pos.x, y, pos.z)),
+            None => self.table.air(),
+        }
+    }
+
+    /// `Level.clip(new ClipContext(from, to, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE,
+    /// entity))`, the only raytrace ported code runs. Outline shapes are the host's, computed
+    /// without an entity (see `docs/trait-mapping.md`).
+    pub fn clip(&self, from: Vec3, to: Vec3) -> BlockHitResult {
+        block_getter::traverse_blocks(
+            from,
+            to,
+            |pos| {
+                let block_state = self.get_block_state(pos);
+                // Fluid.NONE: the fluid shape is empty and never hits
+                self.clip_with_interaction_override(
+                    from,
+                    to,
+                    pos,
+                    block_state.get_shape(pos),
+                    block_state,
+                )
+            },
+            || {
+                let delta = from.subtract_vec(to);
+                BlockHitResult::miss(
+                    to,
+                    Direction::get_approximate_nearest(delta.x, delta.y, delta.z),
+                    BetterBlockPos::from_f64(to.x, to.y, to.z),
+                )
+            },
+        )
+    }
+
+    /// `BlockGetter.clipWithInteractionOverride`
+    pub fn clip_with_interaction_override(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        pos: BetterBlockPos,
+        block_shape: VoxelShape<'_>,
+        block_state: &BlockState,
+    ) -> Option<BlockHitResult> {
+        let result = block_shape.clip(from, to, pos)?;
+        if let Some(hit_override) = block_state.get_interaction_shape(pos).clip(from, to, pos)
+            && hit_override.get_location().subtract_vec(from).length_sqr()
+                < result.get_location().subtract_vec(from).length_sqr()
+        {
+            return Some(result.with_direction(hit_override.get_direction()));
+        }
+        Some(result)
     }
 
     fn check_ids(&self, ids: &[u32]) -> Result<(), WorldError> {

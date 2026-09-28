@@ -1,12 +1,9 @@
 // Ported from baritone src/main/java/baritone/utils/pathing/Favoring.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
-//
-// `Favoring(IPlayerContext, IPath, CalculationContext)` needs `Avoidance.create(ctx)` (phase
-// 4); until then `with_avoidances` takes the avoidances it would create.
 
 use rustc_hash::FxHashMap;
 
 use crate::api::pathing::calc::IPath;
-use crate::api::utils::BetterBlockPos;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::pathing::movement::CalculationContext;
 use crate::utils::pathing::Avoidance;
 
@@ -17,6 +14,15 @@ pub struct Favoring {
 }
 
 impl Favoring {
+    /// `Favoring(IPlayerContext, IPath, CalculationContext)`
+    pub fn from_ctx(
+        ctx: &dyn IPlayerContext,
+        previous: Option<&dyn IPath>,
+        context: &CalculationContext,
+    ) -> Self {
+        Self::with_avoidances(previous, context, &Avoidance::create(ctx))
+    }
+
     /// `Favoring(IPlayerContext, IPath, CalculationContext)`, with `Avoidance.create(ctx)`
     /// passed in as `avoidances`.
     pub fn with_avoidances(

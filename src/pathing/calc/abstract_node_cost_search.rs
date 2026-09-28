@@ -4,10 +4,16 @@
 // `calculate` by the subclass. The search runs on the thread that owns it: `cancel` and
 // `is_finished` go through shared atomic flags (`cancel_handle`, `finished_handle`) so another
 // thread can use them. Upstream's catch of any `Exception` in `calculate` catches panics.
+//
+// Upstream's tick thread reads a running search (`bestPathSoFar`, `getStart`, `cancel`)
+// through `PathingBehavior.getInProgress()`. The port hands out a `SearchHandle` instead; its
+// `best_path_so_far` asks the search and waits for the answer, which the search gives before
+// expanding its next node, and once more when `calculate0` returns. The search takes no lock
+// until then, so the tick thread may wait while holding `pathPlanLock` / `pathCalcLock`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use rustc_hash::FxHashMap;
 
@@ -64,6 +70,105 @@ pub struct AbstractNodeCostSearch {
     is_finished: Arc<AtomicBool>,
 
     pub(crate) cancel_requested: Arc<AtomicBool>,
+
+    pub(crate) progress: Arc<SearchProgress>,
+}
+
+/// The best path so far, published for other threads.
+#[derive(Debug, Default)]
+pub(crate) struct SearchProgress {
+    /// Set by a reader; the search publishes at its next check and clears it.
+    requested: AtomicBool,
+    published: Mutex<Published>,
+    answered: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Published {
+    best_path: Option<Arc<[BetterBlockPos]>>,
+    /// Counts the answers, so a reader knows when its request was answered.
+    answers: u64,
+    /// The search has stopped; `best_path` is its last state.
+    done: bool,
+}
+
+impl SearchProgress {
+    fn published(&self) -> MutexGuard<'_, Published> {
+        self.published.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Publishes `bestPathSoFar()` if a reader asked for it.
+    #[inline]
+    pub(crate) fn publish_if_requested(&self, best: impl FnOnce() -> Option<Box<dyn IPath>>) {
+        if self.requested.load(Ordering::Relaxed) && self.requested.swap(false, Ordering::Relaxed) {
+            self.publish(best(), false);
+        }
+    }
+
+    /// Publishes the search's last state; readers no longer wait.
+    pub(crate) fn finish(&self, best: Option<Box<dyn IPath>>) {
+        self.publish(best, true);
+    }
+
+    fn publish(&self, best: Option<Box<dyn IPath>>, done: bool) {
+        let positions = best.map(|path| Arc::from(path.positions()));
+        let mut published = self.published();
+        if published.done {
+            return;
+        }
+        published.best_path = positions;
+        published.answers += 1;
+        published.done = done;
+        self.answered.notify_all();
+    }
+
+    /// Asks the search for its best path and waits for the answer.
+    fn best_path(&self) -> Option<Arc<[BetterBlockPos]>> {
+        let mut published = self.published();
+        if !published.done {
+            let answers = published.answers;
+            self.requested.store(true, Ordering::Relaxed);
+            published = self
+                .answered
+                .wait_while(published, |p| !p.done && p.answers == answers)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        published.best_path.clone()
+    }
+}
+
+/// A running search as another thread sees it (`PathingBehavior.getInProgress()`).
+#[derive(Clone)]
+pub struct SearchHandle {
+    start: BetterBlockPos,
+    goal: Arc<dyn Goal>,
+    cancel_requested: Arc<AtomicBool>,
+    is_finished: Arc<AtomicBool>,
+    progress: Arc<SearchProgress>,
+}
+
+impl SearchHandle {
+    pub fn cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.is_finished.load(Ordering::Relaxed)
+    }
+
+    pub fn get_goal(&self) -> &Arc<dyn Goal> {
+        &self.goal
+    }
+
+    pub fn get_start(&self) -> BetterBlockPos {
+        self.start
+    }
+
+    /// `bestPathSoFar().map(IPath::positions)`, answered by the search before it expands its
+    /// next node (or its final state once it stopped). Blocks until then.
+    pub fn best_path_so_far(&self) -> Option<Arc<[BetterBlockPos]>> {
+        self.progress.best_path()
+    }
 }
 
 impl AbstractNodeCostSearch {
@@ -91,6 +196,18 @@ impl AbstractNodeCostSearch {
             best_so_far: [None; COEFFICIENTS.len()],
             is_finished: Arc::new(AtomicBool::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(SearchProgress::default()),
+        }
+    }
+
+    /// What `PathingBehavior.getInProgress()` hands out, usable from other threads.
+    pub fn handle(&self) -> SearchHandle {
+        SearchHandle {
+            start: self.get_start(),
+            goal: Arc::clone(&self.goal),
+            cancel_requested: Arc::clone(&self.cancel_requested),
+            is_finished: Arc::clone(&self.is_finished),
+            progress: Arc::clone(&self.progress),
         }
     }
 
@@ -159,6 +276,11 @@ impl AbstractNodeCostSearch {
                 PathCalculationResult::with_path(Type::SuccessSegment, path)
             }
         }));
+        // not upstream: a bestPathSoFar() from now on sees the final state
+        let best = catch_unwind(AssertUnwindSafe(|| self.best_path_so_far()))
+            .ok()
+            .flatten();
+        self.progress.finish(best);
         // this is run regardless of what exception may or may not be raised by calculate0
         self.is_finished.store(true, Ordering::Relaxed);
         result.unwrap_or_else(|e| {
@@ -175,7 +297,7 @@ impl AbstractNodeCostSearch {
     /// Determines the distance squared from the specified node to the start
     /// node. Intended for use in distance comparison, rather than anything that
     /// considers the real distance value, hence the "sq".
-    pub(crate) fn get_dist_from_start_sq(&self, n: &PathNode) -> f64 {
+    pub fn get_dist_from_start_sq(&self, n: &PathNode) -> f64 {
         dist_from_start_sq(self.start_x, self.start_y, self.start_z, n)
     }
 
@@ -215,53 +337,16 @@ impl AbstractNodeCostSearch {
     }
 
     pub(crate) fn best_so_far(&self, log_info: bool, num_nodes: i32) -> Option<Box<dyn IPath>> {
-        let start_node = self.start_node?;
-        let mut best_dist = 0.0;
-        for (i, &best) in self.best_so_far.iter().enumerate() {
-            let Some(best) = best else {
-                continue;
-            };
-            let dist = self.get_dist_from_start_sq(&self.nodes[best as usize]);
-            if dist > best_dist {
-                best_dist = dist;
-            }
-            if dist > MIN_DIST_PATH * MIN_DIST_PATH {
-                // square the comparison since distFromStartSq is squared
-                if log_info {
-                    if COEFFICIENTS[i] >= 3.0 {
-                        println(
-                            "Warning: cost coefficient is greater than three! Probably means that",
-                        );
-                        println(
-                            "the path I found is pretty terrible (like sneak-bridging for dozens of blocks)",
-                        );
-                        println("But I'm going to do it anyway, because yolo");
-                    }
-                    println(&format!("Path goes for {} blocks", dist.sqrt()));
-                    log_debug(&format!("A* cost coefficient {}", COEFFICIENTS[i]));
-                }
-                return Some(Box::new(Path::new(
-                    self.real_start,
-                    start_node,
-                    best,
-                    num_nodes,
-                    Arc::clone(&self.goal),
-                    &self.nodes,
-                )));
-            }
-        }
-        // instead of returning bestSoFar[0], be less misleading
-        // if it actually won't find any path, don't make them think it will by rendering a dark blue that will never actually happen
-        if log_info {
-            log_debug(&format!(
-                "Even with a cost coefficient of {}, I couldn't get more than {} blocks",
-                COEFFICIENTS[COEFFICIENTS.len() - 1],
-                best_dist.sqrt()
-            ));
-            log_debug("No path found =(");
-            log_notification("No path found =(", true);
-        }
-        None
+        best_so_far(
+            self.real_start,
+            self.get_start(),
+            self.start_node,
+            &self.best_so_far,
+            &self.nodes,
+            &self.goal,
+            log_info,
+            num_nodes,
+        )
     }
 
     pub fn is_finished(&self) -> bool {
@@ -279,6 +364,73 @@ impl AbstractNodeCostSearch {
     pub fn map_size(&self) -> usize {
         self.map.len()
     }
+}
+
+impl Drop for AbstractNodeCostSearch {
+    /// A search dropped without calculating never answers; don't leave a reader waiting.
+    fn drop(&mut self) {
+        self.progress.finish(None);
+    }
+}
+
+/// `bestSoFar(boolean, int)` over the search's fields, for callers that borrow them
+/// separately.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn best_so_far(
+    real_start: BetterBlockPos,
+    start: BetterBlockPos,
+    start_node: Option<u32>,
+    best_so_far: &[Option<u32>; COEFFICIENTS.len()],
+    nodes: &[PathNode],
+    goal: &Arc<dyn Goal>,
+    log_info: bool,
+    num_nodes: i32,
+) -> Option<Box<dyn IPath>> {
+    let start_node = start_node?;
+    let mut best_dist = 0.0;
+    for (i, &best) in best_so_far.iter().enumerate() {
+        let Some(best) = best else {
+            continue;
+        };
+        let dist = dist_from_start_sq(start.x, start.y, start.z, &nodes[best as usize]);
+        if dist > best_dist {
+            best_dist = dist;
+        }
+        if dist > MIN_DIST_PATH * MIN_DIST_PATH {
+            // square the comparison since distFromStartSq is squared
+            if log_info {
+                if COEFFICIENTS[i] >= 3.0 {
+                    println("Warning: cost coefficient is greater than three! Probably means that");
+                    println(
+                        "the path I found is pretty terrible (like sneak-bridging for dozens of blocks)",
+                    );
+                    println("But I'm going to do it anyway, because yolo");
+                }
+                println(&format!("Path goes for {} blocks", dist.sqrt()));
+                log_debug(&format!("A* cost coefficient {}", COEFFICIENTS[i]));
+            }
+            return Some(Box::new(Path::new(
+                real_start,
+                start_node,
+                best,
+                num_nodes,
+                Arc::clone(goal),
+                nodes,
+            )));
+        }
+    }
+    // instead of returning bestSoFar[0], be less misleading
+    // if it actually won't find any path, don't make them think it will by rendering a dark blue that will never actually happen
+    if log_info {
+        log_debug(&format!(
+            "Even with a cost coefficient of {}, I couldn't get more than {} blocks",
+            COEFFICIENTS[COEFFICIENTS.len() - 1],
+            best_dist.sqrt()
+        ));
+        log_debug("No path found =(");
+        log_notification("No path found =(", true);
+    }
+    None
 }
 
 /// `getDistFromStartSq` over the start coordinates, for callers that borrow the search's

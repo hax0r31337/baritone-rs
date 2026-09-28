@@ -55,6 +55,60 @@ pub fn floor(value: f64) -> i32 {
     value.floor() as i32
 }
 
+/// `lfloor(double)`
+pub fn lfloor(value: f64) -> i64 {
+    value.floor() as i64
+}
+
+/// `frac(double)`
+pub fn frac(num: f64) -> f64 {
+    num - lfloor(num) as f64
+}
+
+/// `sign(double)`
+pub fn sign(number: f64) -> i32 {
+    if number == 0.0 {
+        0
+    } else if number > 0.0 {
+        1
+    } else {
+        -1
+    }
+}
+
+/// `lerp(double, double, double)`
+pub fn lerp(alpha1: f64, p0: f64, p1: f64) -> f64 {
+    p0 + alpha1 * (p1 - p0)
+}
+
+/// `clamp(double, double, double)`
+pub fn clamp(value: f64, min: f64, max: f64) -> f64 {
+    if value < min {
+        min
+    } else {
+        crate::java::min_f64(value, max)
+    }
+}
+
+/// `clamp(float, float, float)`
+pub fn clamp_f32(value: f32, min: f32, max: f32) -> f32 {
+    if value < min {
+        min
+    } else {
+        crate::java::min_f32(value, max)
+    }
+}
+
+/// `getSeed(int, int, int)`: `x * 3129871` is `int` arithmetic, the rest `long`.
+pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
+    let mut seed = (x.wrapping_mul(3129871) as i64) ^ (z as i64).wrapping_mul(116129781) ^ y as i64;
+    seed = seed
+        .wrapping_mul(seed)
+        .wrapping_mul(42317861)
+        .wrapping_add(seed.wrapping_mul(11));
+    seed >> 16
+}
+
 /// `wrapDegrees(float)`
 pub fn wrap_degrees(angle: f32) -> f32 {
     let mut normalized = angle % 360.0;

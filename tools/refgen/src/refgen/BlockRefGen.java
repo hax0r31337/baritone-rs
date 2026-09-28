@@ -46,6 +46,7 @@ import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.StainedGlassBlock;
 import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -57,8 +58,15 @@ import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.pathfinder.PathComputationType;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.ArrayVoxelShape;
+import net.minecraft.world.phys.shapes.DiscreteVoxelShape;
+import net.minecraft.world.phys.shapes.OffsetDoubleList;
+import net.minecraft.world.phys.shapes.VoxelShape;
+import it.unimi.dsi.fastutil.doubles.DoubleList;
 
 import java.io.InputStreamReader;
+import java.lang.reflect.Constructor;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.lang.reflect.Field;
@@ -78,6 +86,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -135,6 +144,7 @@ final class BlockRefGen {
         root.addProperty("upstream", upstream);
         root.addProperty("minecraft", minecraft);
         root.add("table", table(states));
+        root.add("offsets", offsets(states));
         root.add("configs", configs);
         JsonObject stateRefs = new JsonObject();
         for (String config : configs.keySet()) {
@@ -339,7 +349,7 @@ final class BlockRefGen {
             out.add(t);
         }
         JsonObject table = new JsonObject();
-        table.addProperty("version", 2);
+        table.addProperty("version", 3);
         table.addProperty("air", Block.BLOCK_STATE_REGISTRY.getId(Blocks.AIR.defaultBlockState()));
         table.add("states", out);
         return table;
@@ -482,9 +492,157 @@ final class BlockRefGen {
         t.addProperty("hardness", (double) hardness);
         flag(t, "requires_tool", state.requiresCorrectToolForDrops());
 
-        t.add("collision_shape", shape(state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()));
-        t.add("outline_shape", shape(state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()));
+        // shapes that move with the block's offset are stored unmoved; the host moves them
+        Function<BlockPos, VoxelShape> collision = pos -> state.getCollisionShape(EmptyBlockGetter.INSTANCE, pos);
+        Function<BlockPos, VoxelShape> outline = pos -> state.getShape(EmptyBlockGetter.INSTANCE, pos);
+        boolean collisionMoves = moves(state, collision);
+        boolean outlineMoves = moves(state, outline);
+        t.add("collision_shape", shape(unmoved(state, collision.apply(BlockPos.ZERO), collisionMoves).toAabbs()));
+        t.add("outline_shape", shape(unmoved(state, outline.apply(BlockPos.ZERO), outlineMoves).toAabbs()));
+        t.add("interaction_shape", shape(state.getInteractionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()));
+        if (state.hasOffsetFunction()) {
+            JsonObject offset = new JsonObject();
+            offset.addProperty("type", offsetType(state));
+            // protected; invoked virtually, so blocks that override them answer
+            Method maxHorizontal = BlockBehaviour.class.getDeclaredMethod("getMaxHorizontalOffset");
+            maxHorizontal.setAccessible(true);
+            Method maxVertical = BlockBehaviour.class.getDeclaredMethod("getMaxVerticalOffset");
+            maxVertical.setAccessible(true);
+            offset.addProperty("max_horizontal", (double) (float) maxHorizontal.invoke(block));
+            offset.addProperty("max_vertical", (double) (float) maxVertical.invoke(block));
+            flag(offset, "outline", outlineMoves);
+            flag(offset, "collision", collisionMoves);
+            t.add("offset", offset);
+        }
         return t;
+    }
+
+    /**
+     * Whether {@code shape} follows the state's offset: it differs between two positions whose
+     * offsets differ. Blocks may have an offset they only render with (short grass).
+     */
+    private static boolean moves(BlockState state, Function<BlockPos, VoxelShape> shape) {
+        if (!state.hasOffsetFunction()) {
+            return false;
+        }
+        BlockPos other = null;
+        for (int x = 1; other == null; x++) {
+            if (!state.getOffset(new BlockPos(x, 0, 0)).equals(state.getOffset(BlockPos.ZERO))) {
+                other = new BlockPos(x, 0, 0);
+            }
+        }
+        List<AABB> atZero = shape.apply(BlockPos.ZERO).toAabbs();
+        return !atZero.equals(shape.apply(other).toAabbs());
+    }
+
+    /**
+     * {@code XYZ} when the offset moves the block vertically anywhere, else {@code XZ}: the
+     * offset function does not say which {@code OffsetType} made it.
+     */
+    private static String offsetType(BlockState state) {
+        for (int x = -8; x < 8; x++) {
+            for (int z = -8; z < 8; z++) {
+                if (state.getOffset(new BlockPos(x, 0, z)).y != 0.0) {
+                    return "xyz";
+                }
+            }
+        }
+        return "xz";
+    }
+
+    /**
+     * The shape before {@code state.getOffset(pos)} moved it. A moved shape is an
+     * {@code ArrayVoxelShape} whose coordinate lists are {@code OffsetDoubleList}s over the
+     * unmoved ones; this rebuilds the shape from those.
+     */
+    static VoxelShape unmoved(BlockState state, VoxelShape shape, boolean moves) throws ReflectiveOperationException {
+        if (!moves) {
+            return shape;
+        }
+        if (!(shape instanceof ArrayVoxelShape)) {
+            throw new IllegalStateException(state + " has an offset shape of " + shape.getClass());
+        }
+        Vec3 offset = state.getOffset(BlockPos.ZERO);
+        double[] expected = {offset.x, offset.y, offset.z};
+        String[] names = {"xs", "ys", "zs"};
+        DoubleList[] coords = new DoubleList[3];
+        for (int i = 0; i < 3; i++) {
+            Object list = getField(ArrayVoxelShape.class, shape, names[i]);
+            if (!(list instanceof OffsetDoubleList)) {
+                throw new IllegalStateException(state + " has an offset shape that was not moved");
+            }
+            coords[i] = (DoubleList) getField(OffsetDoubleList.class, list, "delegate");
+            double moved = (double) getField(OffsetDoubleList.class, list, "offset");
+            if (Double.doubleToRawLongBits(moved) != Double.doubleToRawLongBits(expected[i])) {
+                throw new IllegalStateException(state + " was moved by " + moved + ", not its offset " + expected[i]);
+            }
+        }
+        Constructor<ArrayVoxelShape> constructor = ArrayVoxelShape.class.getDeclaredConstructor(
+                DiscreteVoxelShape.class, DoubleList.class, DoubleList.class, DoubleList.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(getField(VoxelShape.class, shape, "shape"), coords[0], coords[1], coords[2]);
+    }
+
+    static Object getField(Class<?> owner, Object target, String name) throws ReflectiveOperationException {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    /**
+     * For every state with an offset: the offset and the moved shapes at a few positions, which
+     * the host computes from the table's offset and unmoved shapes.
+     */
+    private static JsonArray offsets(List<BlockState> states) {
+        // its own random, so the worlds below stay what they were
+        Random r = new Random(0x510e527fL);
+        List<BlockPos> positions = new ArrayList<>();
+        positions.add(BlockPos.ZERO);
+        positions.add(new BlockPos(-1, 0, -1));
+        positions.add(new BlockPos(29999999, 64, -29999999));
+        for (int i = 0; i < 12; i++) {
+            positions.add(new BlockPos(r.nextInt(2001) - 1000, r.nextInt(384) - 64, r.nextInt(2001) - 1000));
+        }
+        JsonArray out = new JsonArray();
+        for (int id = 0; id < states.size(); id++) {
+            BlockState state = states.get(id);
+            if (!state.hasOffsetFunction()) {
+                continue;
+            }
+            for (BlockPos pos : positions) {
+                JsonObject o = new JsonObject();
+                o.addProperty("state", id);
+                o.add("pos", pos(pos));
+                Vec3 offset = state.getOffset(pos);
+                JsonArray bits = new JsonArray();
+                bits.add(Double.doubleToRawLongBits(offset.x));
+                bits.add(Double.doubleToRawLongBits(offset.y));
+                bits.add(Double.doubleToRawLongBits(offset.z));
+                o.add("offset", bits);
+                o.add("outline", shapeBits(state.getShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()));
+                o.add("collision", shapeBits(state.getCollisionShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()));
+                out.add(o);
+            }
+        }
+        return out;
+    }
+
+    static JsonArray pos(BlockPos pos) {
+        JsonArray a = new JsonArray();
+        a.add(pos.getX());
+        a.add(pos.getY());
+        a.add(pos.getZ());
+        return a;
+    }
+
+    static JsonArray shapeBits(List<AABB> boxes) {
+        JsonArray a = new JsonArray();
+        for (AABB b : boxes) {
+            for (double d : new double[]{b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ}) {
+                a.add(Double.doubleToRawLongBits(d));
+            }
+        }
+        return a;
     }
 
     @SuppressWarnings("unchecked")

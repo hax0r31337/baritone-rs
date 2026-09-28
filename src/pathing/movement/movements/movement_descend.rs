@@ -1,17 +1,24 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/movements/MovementDescend.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Missing until phase 4: reset, updateState, safeMode, skipToAscend.
+// `reset` is `Movement::reset`. `safeMode` and `skipToAscend` read the movement's fields and
+// the player context, so they take both.
 
 use rustc_hash::FxHashSet;
 
-use crate::api::pathing::movement::COST_INF;
-use crate::api::utils::BetterBlockPos;
+use crate::Baritone;
+use crate::api::pathing::movement::{COST_INF, MovementStatus};
+use crate::api::utils::input::Input;
+use crate::api::utils::{BetterBlockPos, IPlayerContext, rotation_utils};
 use crate::host::BlockState;
 use crate::java::max_f64;
+use crate::mc::Vec3;
 use crate::pathing::movement::movement::MovementKind;
 use crate::pathing::movement::movement_helper as mh;
-use crate::pathing::movement::movements::{is_ladder_or_vine, is_soul_sand};
-use crate::pathing::movement::{CalculationContext, Movement};
+use crate::pathing::movement::movement_state::MovementTarget;
+use crate::pathing::movement::movements::{is_ladder_or_vine, is_magma, is_soul_sand};
+use crate::pathing::movement::{CalculationContext, Movement, MovementState};
+use crate::settings::settings;
+use crate::utils::BlockStateInterface;
 use crate::utils::pathing::MutableMoveResult;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -236,6 +243,112 @@ impl MovementDescend {
                 return false;
             }
         }
+    }
+
+    pub(crate) fn update_state(
+        m: &mut Movement,
+        baritone: &mut Baritone,
+        state: &mut MovementState,
+    ) {
+        m.update_state_default(baritone, state);
+        if state.get_status() != MovementStatus::Running {
+            return;
+        }
+
+        let (src, dest) = (m.src, m.dest);
+        let ctx = &baritone.player_context;
+        let player_feet = ctx.player_feet();
+        let fake_dest = BetterBlockPos::new(
+            dest.x.wrapping_mul(2).wrapping_sub(src.x),
+            dest.y,
+            dest.z.wrapping_mul(2).wrapping_sub(src.z),
+        );
+        if (player_feet == dest || player_feet == fake_dest)
+            && (mh::is_liquid_ctx(ctx, dest) || ctx.player().position.y - (dest.y as f64) < 0.5)
+        {
+            // lilypads
+            // Wait until we're actually on the ground before saying we're done because sometimes we continue to fall if the next action starts immediately
+            state.set_status(MovementStatus::Success);
+            return;
+            /* else {
+                // System.out.println(player().position().y + " " + playerFeet.getY() + " " + (player().position().y - playerFeet.getY()));
+            }*/
+        }
+        if Self::safe_mode(m, ctx) {
+            let dest_x = (src.x as f64 + 0.5) * 0.17 + (dest.x as f64 + 0.5) * 0.83;
+            let dest_z = (src.z as f64 + 0.5) * 0.17 + (dest.z as f64 + 0.5) * 0.83;
+            state
+                .set_target(MovementTarget::new(
+                    rotation_utils::calc_rotation_from_vec3d(
+                        ctx.player_head(),
+                        Vec3::new(dest_x, dest.y as f64, dest_z),
+                        ctx.player_rotations(),
+                    )
+                    .with_pitch(ctx.player_rotations().get_pitch()),
+                    false,
+                ))
+                .set_input(Input::MoveForward, true);
+            return;
+        }
+        let position = ctx.player().position;
+        let diff_x = position.x - (dest.x as f64 + 0.5);
+        let diff_z = position.z - (dest.z as f64 + 0.5);
+        let ab = (diff_x * diff_x + diff_z * diff_z).sqrt();
+        let x = position.x - (src.x as f64 + 0.5);
+        let z = position.z - (src.z as f64 + 0.5);
+        let from_start = (x * x + z * z).sqrt();
+
+        state.set_input(
+            Input::Sneak,
+            settings().allow_walk_on_magma_blocks
+                && is_magma(
+                    ctx.world()
+                        .get_block_state(ctx.player().block_position().below()),
+                ),
+        );
+
+        if player_feet != dest || ab > 0.25 {
+            let MovementKind::Descend(this) = &mut m.kind else {
+                unreachable!()
+            };
+            let num_ticks = this.num_ticks;
+            this.num_ticks = num_ticks.wrapping_add(1);
+            if num_ticks < 20 && from_start < 1.25 {
+                mh::move_towards(ctx, state, fake_dest);
+            } else {
+                mh::move_towards(ctx, state, dest);
+            }
+        }
+    }
+
+    pub fn safe_mode(m: &Movement, ctx: &dyn IPlayerContext) -> bool {
+        let MovementKind::Descend(this) = &m.kind else {
+            unreachable!()
+        };
+        if this.force_safe_mode {
+            return true;
+        }
+        // (dest - src) + dest is offset 1 more in the same direction
+        // so it's the block we'd need to worry about running into if we decide to sprint straight through this descend
+        let into = m.dest.subtract(m.src.below()).offset(m.dest);
+        if Self::skip_to_ascend(m, ctx) {
+            // if dest extends into can't walk through, but the two above are can walk through, then we can overshoot and glitch in that weird way
+            return true;
+        }
+        for y in 0..=2 {
+            // we could hit any of the three blocks
+            if mh::avoid_walking_into(BlockStateInterface::get(ctx, into.above_n(y))) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn skip_to_ascend(m: &Movement, ctx: &dyn IPlayerContext) -> bool {
+        let into = m.dest.subtract(m.src.below()).offset(m.dest);
+        !mh::can_walk_through_ctx(ctx, into)
+            && mh::can_walk_through_ctx(ctx, into.above())
+            && mh::can_walk_through_ctx(ctx, into.above_n(2))
     }
 }
 

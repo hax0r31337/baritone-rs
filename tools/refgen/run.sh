@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates tests/fixtures/reference/{math_goals.json,blocks.json.gz,paths.json.gz}
+# Regenerates tests/fixtures/reference/{math_goals.json,blocks.json.gz,paths.json.gz,exec.json.gz}
 # and src/mc/mth_tables.rs by running the real upstream Baritone classes against the real
 # Minecraft client jar (registries bootstrapped, block tags bound from its data pack).
 #
@@ -16,6 +16,7 @@ BUILD="$ROOT/target/refgen-build"
 OUT="$ROOT/tests/fixtures/reference/math_goals.json"
 BLOCKS_OUT="$ROOT/tests/fixtures/reference/blocks.json.gz"
 PATHS_OUT="$ROOT/tests/fixtures/reference/paths.json.gz"
+EXEC_OUT="$ROOT/tests/fixtures/reference/exec.json.gz"
 MTH_TABLES="$ROOT/src/mc/mth_tables.rs"
 
 head="$(git -C "$BARITONE" rev-parse HEAD)"
@@ -39,6 +40,8 @@ JARS=(
     "05397ef65dcb60670e0e0dba4854522873af3070 https://libraries.minecraft.net/io/netty/netty-buffer/4.2.16.Final/netty-buffer-4.2.16.Final.jar"
     "01a01d45a9efc228c6d747525848b065e0656b5f https://libraries.minecraft.net/io/netty/netty-codec-base/4.2.16.Final/netty-codec-base-4.2.16.Final.jar"
     "c2bc7fa5acfa2afc777e944d84f0aa65559cc81e https://libraries.minecraft.net/io/netty/netty-common/4.2.16.Final/netty-common-4.2.16.Final.jar"
+    # reflecting on Minecraft's fields (ExecRefGen) loads Connection, a netty channel handler
+    "ae87a3bec51d503475a19fbd718bf777f2fc06c6 https://libraries.minecraft.net/io/netty/netty-transport/4.2.16.Final/netty-transport-4.2.16.Final.jar"
     "a6cff377eecc19c2037bf31568a6d7106b50ba1f https://libraries.minecraft.net/it/unimi/dsi/fastutil/8.5.18/fastutil-8.5.18.jar"
     "65897b3e5731220962e659e001904af3c3cbeba9 https://libraries.minecraft.net/org/apache/commons/commons-lang3/3.20.0/commons-lang3-3.20.0.jar"
     "ad52af0ecf054a7e3f275a2e180ee06d9c490951 https://libraries.minecraft.net/org/apache/logging/log4j/log4j-api/2.26.0/log4j-api-2.26.0.jar"
@@ -98,6 +101,28 @@ SOURCES=(
     "$MAIN/utils/pathing/Favoring.java"
     "$MAIN/utils/pathing/MutableMoveResult.java"
     "$MAIN/utils/pathing/PathBase.java"
+    # execution (ExecRefGen)
+    "$API/utils/RayTraceUtils.java"
+    "$API/utils/RotationUtils.java"
+    "$API/utils/VecUtils.java"
+    "$MAIN/Baritone.java"
+    "$MAIN/behavior/InventoryBehavior.java"
+    "$MAIN/behavior/LookBehavior.java"
+    "$MAIN/behavior/PathingBehavior.java"
+    "$MAIN/behavior/look/ForkableRandom.java"
+    "$MAIN/event/GameEventHandler.java"
+    "$MAIN/pathing/movement/MovementState.java"
+    "$MAIN/pathing/movement/MovementOption.java"
+    "$MAIN/pathing/path/PathExecutor.java"
+    "$MAIN/pathing/path/SplicedPath.java"
+    "$MAIN/process/CustomGoalProcess.java"
+    "$MAIN/process/InventoryPauserProcess.java"
+    "$MAIN/utils/BlockBreakHelper.java"
+    "$MAIN/utils/BlockPlaceHelper.java"
+    "$MAIN/utils/InputOverrideHandler.java"
+    "$MAIN/utils/PathingControlManager.java"
+    "$MAIN/utils/PlayerMovementInput.java"
+    "$MAIN/utils/player/BaritonePlayerContext.java"
 )
 
 rm -rf "$BUILD"
@@ -106,5 +131,5 @@ javac -nowarn -encoding UTF-8 -d "$BUILD" -cp "$CP" \
     -sourcepath "$BARITONE/src/main/java:$BARITONE/src/api/java:$BARITONE/src/schematica_api/java" \
     $(find "$ROOT/tools/refgen/stubs" "$ROOT/tools/refgen/src" -name '*.java') \
     "${SOURCES[@]}"
-java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES" "$BLOCKS_OUT" "$PATHS_OUT"
-echo "wrote $OUT, $BLOCKS_OUT, $PATHS_OUT and $MTH_TABLES"
+java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES" "$BLOCKS_OUT" "$PATHS_OUT" "$EXEC_OUT"
+echo "wrote $OUT, $BLOCKS_OUT, $PATHS_OUT, $EXEC_OUT and $MTH_TABLES"

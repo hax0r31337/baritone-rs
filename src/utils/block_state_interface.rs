@@ -3,15 +3,14 @@
 // The world is an immutable snapshot (`Arc<World>`), which replaces the `copyLoadedChunks`
 // constructor (`createThreadSafeCopy`). The chunk cache (`CachedRegion`, `WorldData`) is not
 // ported: where upstream falls back to it, the port behaves like upstream without world data
-// (air, not loaded). Not ported yet: the static `get(ctx, pos)` / `getBlock(ctx, pos)`, which
-// need `IPlayerContext` (phase 4). Not needed: `access` and `isPassableBlockPos`, which exist to
-// call Minecraft APIs; block shapes come from the host table.
+// (air, not loaded). Not needed: `access` and `isPassableBlockPos`, which exist to call
+// Minecraft APIs; block shapes come from the host table.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::api::utils::BetterBlockPos;
+use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::host::{BlockState, BlockStateTable, Chunk, World};
 use crate::settings::settings;
 use crate::utils::pathing::BetterWorldBorder;
@@ -33,6 +32,18 @@ pub struct BlockStateInterface {
 // keeps the type `!Sync`.
 unsafe impl Send for BlockStateInterface {}
 
+impl Clone for BlockStateInterface {
+    /// Another interface over the same snapshot, with its own lookup cache.
+    fn clone(&self) -> Self {
+        Self {
+            world: Arc::clone(&self.world),
+            world_border: self.world_border,
+            prev: Cell::new(None),
+            use_the_real_world: self.use_the_real_world,
+        }
+    }
+}
+
 impl BlockStateInterface {
     /// `new BlockStateInterface(ctx, true)`: reads from a snapshot of the world.
     pub fn new(world: Arc<World>) -> Self {
@@ -42,6 +53,26 @@ impl BlockStateInterface {
             prev: Cell::new(None),
             use_the_real_world: !settings().path_through_cached_only,
         }
+    }
+
+    /// `new BlockStateInterface(IPlayerContext)`: reads the context's current world.
+    pub fn from_ctx(ctx: &dyn IPlayerContext) -> Self {
+        Self::new(Arc::clone(ctx.world()))
+    }
+
+    /// `get(IPlayerContext, BlockPos)`: `new BlockStateInterface(ctx).get0(pos)`, the context's
+    /// current world (air above and below it and in unloaded chunks).
+    pub fn get(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -> &BlockState {
+        if settings().path_through_cached_only {
+            // get0 skips the real world and asks the chunk cache, which is not ported
+            return ctx.world().table().air();
+        }
+        ctx.world().get_block_state(pos)
+    }
+
+    /// `getBlock(IPlayerContext, BlockPos)`: the state stands for its block.
+    pub fn get_block(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -> &BlockState {
+        Self::get(ctx, pos)
     }
 
     /// The snapshot this reads from.
@@ -116,7 +147,9 @@ impl BlockStateInterface {
     /// get the block at x,y,z from this chunk WITHOUT creating a single blockpos object
     ///
     /// `y` is relative to the bottom of the world. Upstream this is static; the port needs the
-    /// table to turn the id into a state.
+    /// table to turn the id into a state. Upstream also returns `AIR` for a section that holds
+    /// only air variants (`hasOnlyAir()`); the port returns the stored variant (`cave_air`,
+    /// `void_air`), which has the same traits and differs only to checks by name.
     #[inline]
     pub fn get_from_chunk(&self, chunk: &Chunk, x: i32, y: i32, z: i32) -> &BlockState {
         match chunk.section((y >> 4) as usize) {

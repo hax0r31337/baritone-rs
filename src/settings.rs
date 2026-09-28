@@ -191,6 +191,9 @@ pub struct Settings {
     /// How many degrees to randomize the yaw every tick. Set to 0 to disable
     pub random_looking113: f64,
 
+    /// Block reach distance
+    pub block_reach_distance: f32,
+
     /// How many ticks between breaking a block and starting to break the next block. Default in game is 6 ticks.
     /// Values under 1 will be clamped. The delay only applies to non-instant (1-tick) breaks.
     pub block_break_speed: i32,
@@ -637,6 +640,7 @@ impl Default for Settings {
             pause_mining_for_falling_blocks: true,
             right_click_speed: 4,
             random_looking113: 2.0,
+            block_reach_distance: 4.5,
             block_break_speed: 6,
             random_looking: 0.01,
             cost_heuristic: 3.563,
@@ -800,6 +804,7 @@ mod tests {
         "blockBreakSpeed",
         "blockFreeLook",
         "blockPlacementPenalty",
+        "blockReachDistance",
         "blocksToAvoid",
         "blocksToAvoidBreaking",
         "blocksToDisallowBreaking",
