@@ -9,7 +9,10 @@
 //! `tests/fixtures/reference/blocks.json.gz` (`tools/refgen`).
 
 use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
+
+use rustc_hash::FxHashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +105,18 @@ pub struct BlockState {
     /// State properties by name (`"facing" => "north"`).
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+    /// This is its block's default state (`Block.defaultBlockState()`). A block without one
+    /// uses its first state.
+    #[serde(default, rename = "default")]
+    pub is_default: bool,
+    /// Id of its block's default state. Set by [`BlockStateTable::new`]. Two states belong to
+    /// the same block (upstream's `Block`) exactly when their `default_state` is equal.
+    #[serde(skip)]
+    pub default_state: u32,
+    /// Block tags the state is in (`"minecraft:mineable/pickaxe"`). The host must send at least
+    /// the tags that item tool rules refer to ([`crate::host::BlockSet::Tag`]); sorted.
+    #[serde(default)]
+    pub tags: Vec<String>,
 
     /// Air, cave air, void air (Java `AirBlock`).
     #[serde(default)]
@@ -219,6 +234,9 @@ impl Default for BlockState {
             id: 0,
             name: String::new(),
             properties: BTreeMap::new(),
+            is_default: false,
+            default_state: 0,
+            tags: Vec::new(),
             air: false,
             can_walk_on: Ternary::No,
             can_walk_through: Ternary::No,
@@ -271,6 +289,8 @@ pub enum TableError {
     Air(u32),
     /// A state has no name.
     Unnamed(u32),
+    /// A second default state for the same block.
+    DefaultState(u32),
 }
 
 impl fmt::Display for TableError {
@@ -282,6 +302,9 @@ impl fmt::Display for TableError {
             TableError::TooLarge => f.write_str("block state table has too many states"),
             TableError::Air(id) => write!(f, "air state {id} is missing or not air"),
             TableError::Unnamed(id) => write!(f, "block state {id} has no name"),
+            TableError::DefaultState(id) => {
+                write!(f, "block state {id} is a second default state of its block")
+            }
         }
     }
 }
@@ -322,7 +345,7 @@ impl TryFrom<TableData> for BlockStateTable {
 
 impl BlockStateTable {
     /// Bumped whenever a field is added or changes meaning.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Builds the table; `states[i]` gets id `i`. `air` is the state returned for unloaded
     /// chunks, empty sections and positions outside the world's height (`Blocks.AIR`).
@@ -330,11 +353,31 @@ impl BlockStateTable {
         if u32::try_from(states.len()).is_err() {
             return Err(TableError::TooLarge);
         }
-        for (id, state) in states.iter_mut().enumerate() {
-            state.id = id as u32;
+        // default state per block name: the flagged one, else the first
+        let mut defaults: FxHashMap<&str, (u32, bool)> = FxHashMap::default();
+        for (id, state) in states.iter().enumerate() {
+            let id = id as u32;
             if state.name.is_empty() {
-                return Err(TableError::Unnamed(state.id));
+                return Err(TableError::Unnamed(id));
             }
+            match defaults.entry(&state.name) {
+                Entry::Vacant(e) => {
+                    e.insert((id, state.is_default));
+                }
+                Entry::Occupied(mut e) => {
+                    if state.is_default {
+                        if e.get().1 {
+                            return Err(TableError::DefaultState(id));
+                        }
+                        e.insert((id, true));
+                    }
+                }
+            }
+        }
+        let default_states: Vec<u32> = states.iter().map(|s| defaults[s.name.as_str()].0).collect();
+        for (id, (state, default_state)) in states.iter_mut().zip(default_states).enumerate() {
+            state.id = id as u32;
+            state.default_state = default_state;
         }
         if !states.get(air as usize).is_some_and(|s| s.air) {
             return Err(TableError::Air(air));
@@ -419,12 +462,51 @@ mod tests {
             BlockStateTable::new(vec![air], 0),
             Err(TableError::Unnamed(0))
         );
+        let air = BlockState {
+            air: true,
+            ..state("minecraft:air")
+        };
+        let default = |name| BlockState {
+            is_default: true,
+            ..state(name)
+        };
+        assert_eq!(
+            BlockStateTable::new(vec![air, default("minecraft:a"), default("minecraft:a")], 0),
+            Err(TableError::DefaultState(2))
+        );
+    }
+
+    #[test]
+    fn default_states() {
+        let air = BlockState {
+            air: true,
+            ..state("minecraft:air")
+        };
+        let default = |name| BlockState {
+            is_default: true,
+            ..state(name)
+        };
+        let table = BlockStateTable::new(
+            vec![
+                air,
+                state("minecraft:a"),
+                default("minecraft:a"),
+                state("minecraft:b"),
+                state("minecraft:a"),
+                state("minecraft:b"),
+            ],
+            0,
+        )
+        .unwrap();
+        let defaults: Vec<u32> = table.iter().map(|s| s.default_state).collect();
+        // flagged default for a, first state for b
+        assert_eq!(defaults, [0, 2, 2, 3, 2, 3]);
     }
 
     #[test]
     fn deserialize() {
         let json = r#"{
-            "version": 1,
+            "version": 2,
             "air": 0,
             "states": [
                 {"name": "minecraft:air", "air": true, "can_walk_on": "no",
@@ -432,7 +514,8 @@ mod tests {
                 {"name": "minecraft:oak_slab", "properties": {"type": "bottom", "waterlogged": "true"},
                  "can_walk_on": "maybe", "can_walk_through": "no", "fully_passable": "no",
                  "fluid": "water", "fluid_source": true, "fluid_amount": 8, "slab": "bottom",
-                 "hardness": 2.0, "collision_shape": [[0, 0, 0, 1, 0.5, 1]]}
+                 "hardness": 2.0, "collision_shape": [[0, 0, 0, 1, 0.5, 1]],
+                 "default": true, "tags": ["minecraft:mineable/axe", "minecraft:slabs"]}
             ]
         }"#;
         let table: BlockStateTable = serde_json::from_str(json).unwrap();
@@ -446,8 +529,11 @@ mod tests {
             slab.collision_shape,
             [Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)]
         );
+        assert!(slab.is_default);
+        assert_eq!(slab.default_state, 1);
+        assert_eq!(slab.tags, ["minecraft:mineable/axe", "minecraft:slabs"]);
 
-        let wrong_version = json.replace("\"version\": 1", "\"version\": 2");
+        let wrong_version = json.replace("\"version\": 2", "\"version\": 1");
         assert!(serde_json::from_str::<BlockStateTable>(&wrong_version).is_err());
         let unknown_field = json.replace("\"air\": true", "\"air\": true, \"airy\": true");
         assert!(serde_json::from_str::<BlockStateTable>(&unknown_field).is_err());

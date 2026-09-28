@@ -5,6 +5,9 @@
 //! compared bit-exactly against upstream, so ported code uses these helpers wherever Java calls
 //! `Math.min`/`Math.max` on floating point values.
 
+use std::sync::LazyLock;
+use std::time::Instant;
+
 /// `java.lang.Math.min(double, double)`
 #[inline]
 pub fn min_f64(a: f64, b: f64) -> f64 {
@@ -51,6 +54,14 @@ pub fn max_f32(a: f32, b: f32) -> f32 {
         return b;
     }
     if a >= b { a } else { b }
+}
+
+/// `System.currentTimeMillis()` where upstream uses it to measure time: milliseconds on a
+/// monotonic clock with an arbitrary origin, so only differences mean anything (upstream's
+/// wall clock can jump).
+pub fn current_time_millis() -> i64 {
+    static ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+    ORIGIN.elapsed().as_millis() as i64
 }
 
 #[cfg(test)]

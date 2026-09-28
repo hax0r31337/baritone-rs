@@ -168,6 +168,15 @@ impl BetterBlockPos {
         }
     }
 
+    /// `BlockPos.subtract(Vec3i)`, inherited from Minecraft's `BlockPos`.
+    pub fn subtract(self, other: BetterBlockPos) -> Self {
+        Self::new(
+            self.x.wrapping_sub(other.x),
+            self.y.wrapping_sub(other.y),
+            self.z.wrapping_sub(other.z),
+        )
+    }
+
     pub fn distance_sq(&self, to: &BetterBlockPos) -> f64 {
         let dx = self.x as f64 - to.x as f64;
         let dy = self.y as f64 - to.y as f64;

@@ -29,6 +29,7 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
+import java.io.PrintStream;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,6 +64,17 @@ public final class RefGen {
     private RefGen() {}
 
     public static void main(String[] args) throws Exception {
+        // Bootstrap redirects System.out/err into log4j, which has no provider here
+        PrintStream err = System.err;
+        try {
+            run(args);
+        } catch (Throwable t) {
+            t.printStackTrace(err);
+            System.exit(1);
+        }
+    }
+
+    private static void run(String[] args) throws Exception {
         // the real Settings class (and the block checks) need the registries
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -81,6 +93,8 @@ public final class RefGen {
         Files.writeString(Path.of(args[2]), new Gson().toJson(root) + "\n");
         Files.writeString(Path.of(args[3]), mthTables(args[1]));
         BlockRefGen.write(args[0], args[1], Path.of(args[4]));
+        // after BlockRefGen, which binds the block and item tags
+        PathRefGen.write(args[0], args[1], Path.of(args[5]));
     }
 
     /**
@@ -111,15 +125,15 @@ public final class RefGen {
 
     // region helpers
 
-    private static JsonPrimitive d(double v) {
+    static JsonPrimitive d(double v) {
         return new JsonPrimitive(Double.doubleToRawLongBits(v));
     }
 
-    private static JsonPrimitive f(float v) {
+    static JsonPrimitive f(float v) {
         return new JsonPrimitive(Float.floatToRawIntBits(v));
     }
 
-    private static JsonArray row(Object... values) {
+    static JsonArray row(Object... values) {
         JsonArray a = new JsonArray();
         for (Object v : values) {
             if (v instanceof JsonElement e) {
@@ -137,7 +151,7 @@ public final class RefGen {
         return a;
     }
 
-    private static JsonArray pos(BlockPos p) {
+    static JsonArray pos(BlockPos p) {
         return row(p.getX(), p.getY(), p.getZ());
     }
 
@@ -568,7 +582,7 @@ public final class RefGen {
 
     // region goals
 
-    private static JsonObject spec(String kind, Object... kv) {
+    static JsonObject spec(String kind, Object... kv) {
         JsonObject o = new JsonObject();
         o.addProperty("kind", kind);
         for (int i = 0; i < kv.length; i += 2) {
@@ -578,21 +592,21 @@ public final class RefGen {
         return o;
     }
 
-    private record GoalCase(JsonObject spec, Goal goal, BlockPos anchor) {}
+    record GoalCase(JsonObject spec, Goal goal, BlockPos anchor) {}
 
-    private static GoalCase block(int x, int y, int z) {
+    static GoalCase block(int x, int y, int z) {
         return new GoalCase(spec("GoalBlock", "x", x, "y", y, "z", z), new GoalBlock(x, y, z), new BlockPos(x, y, z));
     }
 
-    private static GoalCase xz(int x, int z) {
+    static GoalCase xz(int x, int z) {
         return new GoalCase(spec("GoalXZ", "x", x, "z", z), new GoalXZ(x, z), new BlockPos(x, 64, z));
     }
 
-    private static GoalCase yLevel(int level) {
+    static GoalCase yLevel(int level) {
         return new GoalCase(spec("GoalYLevel", "level", level), new GoalYLevel(level), new BlockPos(0, level, 0));
     }
 
-    private static GoalCase runAway(double distance, Integer maintainY, BlockPos... from) {
+    static GoalCase runAway(double distance, Integer maintainY, BlockPos... from) {
         JsonArray fromJson = new JsonArray();
         BetterBlockPos[] better = new BetterBlockPos[from.length];
         for (int i = 0; i < from.length; i++) {
@@ -603,7 +617,7 @@ public final class RefGen {
                 new GoalRunAway(distance, maintainY, better), from[0]);
     }
 
-    private static GoalCase composite(GoalCase... cases) {
+    static GoalCase composite(GoalCase... cases) {
         JsonArray specs = new JsonArray();
         Goal[] goals = new Goal[cases.length];
         for (int i = 0; i < cases.length; i++) {
@@ -614,7 +628,7 @@ public final class RefGen {
                 cases.length == 0 ? BlockPos.ZERO : cases[0].anchor);
     }
 
-    private static GoalCase inverted(GoalCase origin) {
+    static GoalCase inverted(GoalCase origin) {
         return new GoalCase(spec("GoalInverted", "origin", origin.spec), new GoalInverted(origin.goal), origin.anchor);
     }
 

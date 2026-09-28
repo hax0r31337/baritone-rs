@@ -1,18 +1,17 @@
 // Ported from baritone src/main/java/baritone/pathing/movement/MovementHelper.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Phase 2 ports the block checks that need only a BlockStateInterface. Missing until phase 3:
-// the CalculationContext overloads (canWalkThrough, canWalkOn, fullyPassable),
-// canUseFrostWalker(context), mustBeSolidToWalkOn, getMiningDurationTicks. Missing until phase 4:
-// the IPlayerContext overloads, isDoorPassable, isGatePassable, isHorizontalBlockPassable,
-// canUseFrostWalker(ctx), switchToBestToolFor, the movement input helpers, attemptToPlaceABlock,
-// steppingOnBlocks.
+// Missing until phase 4: the IPlayerContext overloads, isDoorPassable, isGatePassable,
+// isHorizontalBlockPassable, canUseFrostWalker(ctx), switchToBestToolFor, the movement input
+// helpers, attemptToPlaceABlock, steppingOnBlocks.
 //
 // Block identity checks read host traits; docs/trait-mapping.md lists which trait replaces each
 // one. The three `*BlockState` functions start from the tri-states the host computed with
 // upstream's default settings and apply the settings that differ.
 
+use crate::api::pathing::movement::COST_INF;
 use crate::api::utils::BetterBlockPos;
-use crate::host::{BlockState, Climbable, Fluid, SlabType};
+use crate::host::{BlockState, Climbable, Fluid, Half, Openable, SlabType};
+use crate::pathing::movement::CalculationContext;
 use crate::pathing::precompute::Ternary;
 use crate::settings::settings;
 use crate::utils::BlockStateInterface;
@@ -81,6 +80,28 @@ pub fn falling_block_is_free(state: &BlockState) -> bool {
 /// `canWalkThrough(BlockStateInterface, int, int, int)`
 pub fn can_walk_through_bsi(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> bool {
     can_walk_through_bsi_state(bsi, x, y, z, bsi.get0(x, y, z))
+}
+
+/// `canWalkThrough(CalculationContext, int, int, int, BlockState)`
+#[inline]
+pub fn can_walk_through_state(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &BlockState,
+) -> bool {
+    context
+        .precomputed_data
+        .can_walk_through(&context.bsi, x, y, z, state)
+}
+
+/// `canWalkThrough(CalculationContext, int, int, int)`
+#[inline]
+pub fn can_walk_through(context: &CalculationContext, x: i32, y: i32, z: i32) -> bool {
+    context
+        .precomputed_data
+        .can_walk_through(&context.bsi, x, y, z, context.get(x, y, z))
 }
 
 /// `canWalkThrough(BlockStateInterface, int, int, int, BlockState)`
@@ -158,6 +179,29 @@ pub fn can_walk_through_position(
 pub fn fully_passable_block_state(state: &BlockState) -> Ternary {
     // no settings involved, the host's tri-state is upstream's
     state.fully_passable
+}
+
+/// canWalkThrough but also won't impede movement at all. so not including doors or fence gates (we'd have to right click),
+/// not including water, and not including ladders or vines or cobwebs (they slow us down)
+///
+/// `fullyPassable(CalculationContext, int, int, int)`
+#[inline]
+pub fn fully_passable(context: &CalculationContext, x: i32, y: i32, z: i32) -> bool {
+    fully_passable_state(context, x, y, z, context.get(x, y, z))
+}
+
+/// `fullyPassable(CalculationContext, int, int, int, BlockState)`
+#[inline]
+pub fn fully_passable_state(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &BlockState,
+) -> bool {
+    context
+        .precomputed_data
+        .fully_passable(&context.bsi, x, y, z, state)
 }
 
 /// params retained for backwards compatibility
@@ -294,9 +338,81 @@ pub fn can_walk_on_position(
     false // If we don't recognise it then we want to just return false to be safe.
 }
 
+/// `canWalkOn(CalculationContext, int, int, int, BlockState)`
+#[inline]
+pub fn can_walk_on_state(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &BlockState,
+) -> bool {
+    context
+        .precomputed_data
+        .can_walk_on(&context.bsi, x, y, z, state)
+}
+
+/// `canWalkOn(CalculationContext, int, int, int)`
+#[inline]
+pub fn can_walk_on(context: &CalculationContext, x: i32, y: i32, z: i32) -> bool {
+    can_walk_on_state(context, x, y, z, context.get(x, y, z))
+}
+
 /// `canWalkOn(BlockStateInterface, int, int, int)`
 pub fn can_walk_on_bsi(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> bool {
     can_walk_on_bsi_state(bsi, x, y, z, bsi.get0(x, y, z))
+}
+
+/// `canUseFrostWalker(CalculationContext, BlockState)`
+pub fn can_use_frost_walker(context: &CalculationContext, state: &BlockState) -> bool {
+    // state == FrostedIceBlock.meltsInto() (the default water state, a source) && LEVEL == 0
+    context.frost_walker != 0
+        && state.liquid_block
+        && state.fluid == Fluid::Water
+        && state.fluid_source
+}
+
+/// If movements make us stand/walk on this block, will it have a top to walk on?
+pub fn must_be_solid_to_walk_on(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &BlockState,
+) -> bool {
+    if is_climbable(state) {
+        return false;
+    }
+    if state.fluid != Fluid::Empty {
+        // used for frostwalker so only includes blocks where we are still on ground when leaving them to any side
+        if let Some(slab) = state.slab {
+            if slab != SlabType::Bottom {
+                return true;
+            }
+        } else if let Some(stairs) = state.stairs {
+            if stairs.half == Half::Top {
+                return true;
+            }
+            // SHAPE is INNER_LEFT or INNER_RIGHT
+            if stairs.inner_corner {
+                return true;
+            }
+        } else if state.openable == Some(Openable::TrapDoor) {
+            if !state.open && state.half == Half::Top {
+                return true;
+            }
+        } else if state.climbable == Some(Climbable::Scaffolding) || state.leaves {
+            return true;
+        }
+        if context.assume_walk_on_water {
+            return false;
+        }
+        let block_above = context.get_block(x, y.wrapping_add(1), z);
+        if block_above.liquid_block {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn can_place_against(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> bool {
@@ -335,6 +451,56 @@ pub fn is_climbable(state: &BlockState) -> bool {
         state.climbable,
         Some(Climbable::Ladder | Climbable::Vine | Climbable::NetherVine)
     )
+}
+
+/// `getMiningDurationTicks(CalculationContext, int, int, int, boolean)`
+pub fn get_mining_duration_ticks(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    include_falling: bool,
+) -> f64 {
+    get_mining_duration_ticks_state(context, x, y, z, context.get(x, y, z), include_falling)
+}
+
+/// `getMiningDurationTicks(CalculationContext, int, int, int, BlockState, boolean)`
+pub fn get_mining_duration_ticks_state(
+    context: &CalculationContext,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &BlockState,
+    include_falling: bool,
+) -> f64 {
+    if !can_walk_through_state(context, x, y, z, state) {
+        if state.fluid != Fluid::Empty {
+            return COST_INF;
+        }
+        let mult = context.break_cost_multiplier_at(x, y, z, state);
+        if mult >= COST_INF {
+            return COST_INF;
+        }
+        if avoid_breaking(&context.bsi, x, y, z, state) {
+            return COST_INF;
+        }
+        let str_vs_block = context.tool_set.get_str_vs_block(state);
+        if str_vs_block <= 0.0 {
+            return COST_INF;
+        }
+        let mut result = 1.0 / str_vs_block;
+        result += context.break_block_additional_cost;
+        result *= mult;
+        if include_falling {
+            let above = context.get(x, y.wrapping_add(1), z);
+            if above.falls {
+                result +=
+                    get_mining_duration_ticks_state(context, x, y.wrapping_add(1), z, above, true);
+            }
+        }
+        return result;
+    }
+    0.0 // we won't actually mine it, so don't check fallings above
 }
 
 pub fn is_bottom_slab(state: &BlockState) -> bool {

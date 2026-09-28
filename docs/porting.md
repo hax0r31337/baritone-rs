@@ -84,6 +84,32 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 - `toString` is `Display`, with upstream's format. Floating point output uses Rust formatting,
   not Java's `Float.toString`; it is for logs only.
 - Class hierarchies: `Movement` subclasses become an enum, processes are trait objects.
+  `Movement` is a struct with the base class's fields and a `MovementKind` enum; each variant
+  is the struct of the subclass's file (`MovementTraverse`) with the subclass's fields. The
+  subclass's constructor is `MovementX::new(...) -> Movement`, its static `cost` stays on
+  `MovementX`, and `Movement` dispatches the overridden methods (`calculate_cost`, ...) on the
+  kind. Movements do not hold the `IBaritone`/`IPlayerContext`; execution passes it in.
+- Abstract base classes with one subclass keep their own file and struct, and the subclass
+  holds it (`AStarPathFinder.search: AbstractNodeCostSearch`). Abstract methods are passed in
+  (`AbstractNodeCostSearch::calculate` takes `calculate0`). `PathBase`'s methods are functions
+  that every path's `IPath` implementation calls.
+- `IPath`: paths are `Box<dyn IPath>`. Methods that return a new path (`postProcess`,
+  `cutoffAtLoadedChunks`, `staticCutoff`) take `self: Box<Self>`, since upstream always replaces
+  its reference with the result. Paths hand out `&[Movement]` (the only `IMovement`);
+  `CutoffPath` copies the part of the previous path it keeps.
+- Object graphs become arenas: `PathNode`s live in the search's `Vec`, `previous` is an index,
+  and open sets take the arena in each call.
+- `catch (Exception e)` around a whole computation (`AbstractNodeCostSearch.calculate`) is
+  `catch_unwind`: the panics that stand in for upstream's exceptions become the same result.
+- `Helper.logDebug`/`logDirect`/`logNotification` and `System.out.println` go to the `log` crate
+  (`crate::api::utils::helper`).
+- `System.currentTimeMillis()` used for timeouts is `java::current_time_millis()`, a monotonic
+  clock.
+- Coordinates in movement cost code use plain `+`/`-` for small offsets (`y + 1`, `x + dx * i`):
+  positions come from the world, far from `i32` overflow, and release builds wrap like Java
+  anyway. Arithmetic on values that are not world positions keeps `wrapping_*`.
+- `CalculationContext` is built from the world snapshot and the host's `Player`; it captures the
+  `ActionCosts` (`context.costs`), which movements read instead of `action_costs()`.
 
 ## Verification
 
@@ -91,8 +117,10 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 classes under test are listed in `SOURCES`; javac compiles whatever else they reference from
 upstream's source tree (`-sourcepath`). Only `BaritoneAPI` is stubbed, because the real one reads
 the settings file and boots the Baritone provider; `Settings` is the real class. `RefGen`
-bootstraps the Minecraft registries and binds the block tags from the jar's data pack, so block
-checks behave as in game. It writes:
+bootstraps the Minecraft registries, binds the block and item tags from the jar's data pack and
+binds the item components (from datagen's vanilla registries), so block and item checks behave
+as in game. `Bootstrap` redirects `System.out`/`System.err` into log4j, which has no provider
+here: `RefGen.main` prints failures to the original stream. It writes:
 
 - `tests/fixtures/reference/math_goals.json`: math, positions, goals (`RefGen`).
 - `tests/fixtures/reference/blocks.json.gz`: the Java-semantics block state table, and the
@@ -100,11 +128,20 @@ checks behave as in game. It writes:
   state and in random worlds, under two settings configurations (`BlockRefGen`). Upstream code
   that needs a `BlockStateInterface` gets `BlockRefGen.FakeBsi`, a subclass over a map of
   blocks created without running the client-bound constructor.
+- `tests/fixtures/reference/paths.json.gz`: path calculations by the real `AStarPathFinder` in
+  generated worlds (terrain, block noise, flat) under four settings configurations and five
+  inventories, the raw result of every `Moves` at sampled positions, and `ToolSet` speeds and
+  slots for every block (`PathRefGen`). The client objects the code reaches for are stand-ins
+  allocated without a constructor (`ClientLevel`, `LocalPlayer`, an array-backed
+  `BlockStateInterface`, an `IBaritone` proxy); the `CalculationContext` is allocated the same
+  way and its fields are set with the expressions of upstream's constructor, and `PathRefGen`
+  fails if upstream adds a field it does not set. Timeouts are large enough that results do not
+  depend on speed; `a_star_path_finder.rs` unit tests cover timeouts and cancellation.
 
 `tests/reference_*.rs` replay the fixtures and compare floats bit for bit.
 
 To cover a newly ported class: add its upstream source to `SOURCES` in `run.sh`, add a section
-to `RefGen.java` or `BlockRefGen.java`, regenerate, and add a replay test. Upstream code that
+to `RefGen.java`, `BlockRefGen.java` or `PathRefGen.java`, regenerate, and add a replay test. Upstream code that
 cannot run standalone may be copied into `RefGen.java` verbatim (see the `RotationUtils`
 region). Regenerate after every upstream sync; the replay tests fail if the fixture's commit
 differs from `UPSTREAM`.

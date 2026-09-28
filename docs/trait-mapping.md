@@ -3,14 +3,18 @@
 This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) that asks about Minecraft
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
 upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
-table version 1); the field list is at the end. Locations are `File.java:line`; every file name used
+table version 2); the field list is at the end. Item and player checks map to `crate::host::player`
+(Table D). Locations are `File.java:line`; every file name used
 here is unique in the kept scope. `MH` = `MovementHelper.java`.
 
 `tools/refgen` exports the whole table from a real 26.3 client (`tests/fixtures/reference/blocks.json.gz`),
 and `tests/reference_block_states.rs` checks the Rust side of every row it can reach (the tri-states,
 the MovementHelper block checks, PrecomputedData, BetterWorldBorder) against the real upstream code, for
 every state and in random worlds. When a new check needs a new field: add it to `BlockState`, export it
-in `BlockRefGen.traits`, bump `BlockStateTable::VERSION`, and add a row here.
+in `BlockRefGen.traits`, bump `BlockStateTable::VERSION`, and add a row here. `tests/reference_paths.rs`
+covers the movement rows through the real upstream path finder (every `Moves` result and whole paths).
+Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`, `WATER`,
+`LADDER || VINE`) are helpers in `src/pathing/movement/movements/mod.rs`.
 
 ## Caveats
 
@@ -163,9 +167,9 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `getShape(world,pos)` (outline), `Shapes.block()` | `outline_shape` | RotationUtils.java:211,213 | Side-offset aim points. Empty shape → unit cube |
 | `level.clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)` | `outline_shape` | RayTraceUtils.java:62 | Raytrace against outline shapes, ignoring fluids |
 | `getDestroySpeed(null,null)` | `hardness` | ToolSet.java:210 | < 0 or throws → unbreakable |
-| `ItemStack.getDestroySpeed(state)` | `harvest_tools` + `required_tier` vs. the item's tool data | ToolSet.java:219 | Tool speed multiplier (the item's tool component rules) |
-| `requiresCorrectToolForDrops()`, `ItemStack.isCorrectToolForDrops(state)` | `requires_tool`, `harvest_tools`, `required_tier` | ToolSet.java:234 | Divide by 30 (correct tool) or 100 |
-| break data per `Block` from its default state | index by `name` (default state) | ToolSet.java:97,153,192; InventoryBehavior.java:152 | Cache key is the block, not the state |
+| `ItemStack.getDestroySpeed(state)` | the item's `tool` rules matched against `tags` / `name` | ToolSet.java:219 | Tool speed multiplier: the first rule with a speed whose block set holds the state, else the default speed; 1 without a tool |
+| `requiresCorrectToolForDrops()`, `ItemStack.isCorrectToolForDrops(state)` | `requires_tool`; the item's `tool` rules | ToolSet.java:234 | Divide by 30 (correct tool) or 100 |
+| break data per `Block` from its default state (`getBlock()`, `defaultBlockState()`) | `default_state` (from `default`) | ToolSet.java:97,153,192; InventoryBehavior.java:152 | Cache key is the block, not the state |
 | `Block.BLOCK_STATE_REGISTRY` size / `getId` | host state id, table length | PrecomputedData.java:27,73,88,103 | Tri-state cache index |
 | settings `List<Block>` membership | `name` | MH:74 (`blocksToDisallowBreaking`),155 (`blocksToAvoid`); ToolSet.java:196 (`blocksToAvoidBreaking`); CalculationContext.java:204, MineProcess.java:529 (`allowBreakAnyway`) | Setting lists hold block names |
 | `harvest.block == state.getBlock()`, scan block lists | `name` | FarmProcess.java:172,198-207 | Farm target matching / chunk scan |
@@ -177,9 +181,30 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `ctx.world().dimension() == Level.NETHER` (not block data) | world `water_evaporates` (new, world-level) | CalculationContext.java:104; MovementFall.java:105 | No water-bucket falls in the Nether |
 | `getEntitiesOfClass(FallingBlockEntity)` (not block data) | entity list | Movement.java:159 | Pause mining while falling blocks are in the air |
 
+## Table D: Items and the player
+
+The player and its items are `crate::host::player` (`Player`, `Inventory`, `ItemStack`, `Tool`). Items
+carry what upstream reads from their components and tags; the host evaluates enchantments, which are
+data driven. `tools/refgen` exports real 26.3 items (`tests/fixtures/reference/paths.json.gz`), and
+`tests/reference_paths.rs` checks ToolSet and the calculation context against upstream.
+
+| Upstream | Port | Locations | What the check does |
+|---|---|---|---|
+| `DataComponents.TOOL` (`Tool`, `Tool.Rule`) | `ItemStack::tool` (`Tool`, `ToolRule`); `HolderSet<Block>` is `BlockSet::Tag` (matched against `BlockState::tags`) or `BlockSet::Blocks` (names) | ToolSet.java:219,234 | Mining speed and correct tool |
+| `itemStack.is(ItemTags.SWORDS)`, `is(ItemTags.*_TOOL_MATERIALS)` | `ItemStack::tags` | ToolSet.java:95,145 | Skip swords; material cost. The material tags hold repair materials, so every tool gets -1 (kept) |
+| `getDamageValue()`, `getMaxDamage()` | `damage`, `max_damage` | ToolSet.java:149 | `itemSaver` |
+| enchantment `MINING_EFFICIENCY` attribute effect | `ItemStack::mining_efficiency` (host evaluates the first such enchantment at its level) | ToolSet.java:222-231 | Added to speeds above 1 |
+| `Enchantments.SILK_TOUCH` level > 0 | `ItemStack::silk_touch` | ToolSet.java:107-117 | Tie break |
+| `hasEffect(MobEffects.HASTE / MINING_FATIGUE)`, `getAmplifier()` | `Player::effects` | ToolSet.java:252-266 | Break speed amplifier |
+| `getInventory().getItem(i)`, `getSelectedSlot()`, `findSlotMatchingItem`, `isHotbarSlot` | `Inventory` | ToolSet.java:132,143; CalculationContext.java:104 | Hotbar tools; water bucket on the hotbar (matched by item id only) |
+| `getFoodData().getFoodLevel()` | `Player::food_level` | CalculationContext.java:105 | Sprinting needs food > 6 |
+| equipment `FROST_WALKER` level | `Player::frost_walker` (last found, like upstream) | CalculationContext.java:116-127 | Frost walker level |
+| equipment `WATER_MOVEMENT_EFFICIENCY` attribute effect | `Player::water_movement_efficiency`; `None` is upstream's default multiplier 1, so water walking costs the same as land walking without Depth Strider (kept) | CalculationContext.java:134-148 | `waterWalkSpeed` |
+| `InventoryBehavior.hasGenericThrowaway()` | a `CalculationContext::new` argument until InventoryBehavior is ported (phase 4) | CalculationContext.java:103 | `hasThrowaway` |
+
 ## Trait fields
 
-`crate::host::BlockState`, table version 1. Serialized as JSON with these names; enum values are
+`crate::host::BlockState`, table version 2. Serialized as JSON with these names; enum values are
 snake_case (`"nether_vine"`), `Option` fields are absent or `null` when unset, and every field except
 `name` and the three tri-states defaults to false / zero / empty. "(new)" marks fields the plan's
 trait table does not list.
@@ -187,6 +212,8 @@ trait table does not list.
 | Field | Type | Meaning |
 |---|---|---|
 | `name`, `properties` | `String`, `BTreeMap<String,String>` | Block id and state properties. Used by BlockOptionalMeta, Farm/Mine/GetToBlock targets and the settings block lists |
+| `default` (new, v2) | `bool` | The block's default state. The table derives `default_state` (the id of each state's block's default state; the first state of the block when none is flagged), which stands for the `Block` |
+| `tags` (new, v2) | `[String]`, sorted | Block tags the state is in. At least the tags item tool rules refer to (`mineable/*`, `incorrect_for_*_tool`, `sword_efficient`, `leaves`, ...) |
 | `air` | `bool` | Java `AirBlock` (air, cave air, void air) |
 | `can_walk_on`, `can_walk_through`, `fully_passable` | `Ternary` | Precomputed tri-states. MAYBE → position check in Rust. Setting overrides are listed under Caveats |
 | `fluid` | `Empty\|Water\|Lava` | Fluid in this state, waterlogged and bubble column included |
@@ -221,11 +248,13 @@ trait table does not list.
 | `requires_tool` | `bool` | `requiresCorrectToolForDrops()` |
 | `collision_shape`, `outline_shape` | `Vec<Aabb>` | Aim points, raytrace, position checks. Computed at `BlockPos.ZERO` with no world, so position-offset shapes (flowers, bamboo) are at their zero offset |
 
-Not in version 1, added with the code that reads them:
+Version 2 replaced the planned `harvest_tools` / `required_tier` with `tags` and the items' own tool
+rules, which reproduce `Tool.getMiningSpeed` exactly (swords, shears and tier denial rules included).
+
+Not in version 2, added with the code that reads them:
 
 | Field | Type | Meaning | Phase |
 |---|---|---|---|
-| `harvest_tools`, `required_tier` | tool-class set, tier | Refines the plan's "harvest tool class" into a set, because swords and shears have per-block speed rules. Exporting them needs the item tool components, which read block tags | ToolSet |
 | `drops` (new) | `[item name]` | Default-state loot with a netherite pickaxe (the BlockOptionalMeta stack match). Needs loot tables | 5 |
 | `bonemealable` (new) | `bool` | Approximates `isValidBonemealTarget && isBonemealSuccess` | 5 |
 

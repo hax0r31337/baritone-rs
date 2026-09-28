@@ -349,6 +349,9 @@ pub struct Settings {
     #[serde(rename = "slowPathTimeoutMS")]
     pub slow_path_timeout_ms: i64,
 
+    /// Print all the debug messages to chat
+    pub chat_debug: bool,
+
     /// Move without having to force the client-sided rotations
     pub free_look: bool,
 
@@ -560,6 +563,9 @@ pub struct Settings {
     /// Use sword to mine.
     pub use_sword_to_mine: bool,
 
+    /// Desktop notifications
+    pub desktop_notifications: bool,
+
     /// Desktop notification on path complete
     pub notification_on_path_complete: bool,
 
@@ -664,6 +670,7 @@ impl Default for Settings {
             slow_path: false,
             slow_path_time_delay_ms: 100,
             slow_path_timeout_ms: 40000,
+            chat_debug: false,
             free_look: true,
             block_free_look: false,
             elytra_free_look: true,
@@ -715,6 +722,7 @@ impl Default for Settings {
             follow_target_max_distance: 0,
             disable_completion_check: false,
             use_sword_to_mine: true,
+            desktop_notifications: false,
             notification_on_path_complete: true,
             notification_on_farm_fail: true,
             notification_on_explore_finished: true,
@@ -797,10 +805,12 @@ mod tests {
         "blocksToDisallowBreaking",
         "cancelOnGoalInvalidation",
         "censorCoordinates",
+        "chatDebug",
         "considerPotionEffects",
         "costHeuristic",
         "costVerificationLookahead",
         "cutoffAtLoadBoundary",
+        "desktopNotifications",
         "disableCompletionCheck",
         "disconnectOnArrival",
         "elytraFreeLook",

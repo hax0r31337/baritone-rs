@@ -14,10 +14,19 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.Registry;
+import net.minecraft.core.component.DataComponentInitializers;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.Tool;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.AirBlock;
@@ -54,11 +63,14 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -88,7 +100,18 @@ final class BlockRefGen {
     private BlockRefGen() {}
 
     static void write(String upstream, String minecraft, Path out) throws Exception {
-        bindBlockTags();
+        bindTags(BuiltInRegistries.BLOCK, "block");
+        if (!Blocks.SOUL_FIRE.defaultBlockState().is(TagKey.create(Registries.BLOCK, Identifier.parse("minecraft:fire")))) {
+            throw new IllegalStateException("block tags not bound");
+        }
+        bindTags(BuiltInRegistries.ITEM, "item");
+        // item components are bound when a world's registries load (like the client does in
+        // RegistryDataCollector.updateComponents); datagen's vanilla registries stand in
+        HolderLookup.Provider lookup = VanillaRegistries.createReloadableLookup(VanillaRegistries.createWorldLookup());
+        BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(lookup).forEach(DataComponentInitializers.PendingComponents::apply);
+        if (!Items.IRON_SWORD.getDefaultInstance().is(ItemTags.SWORDS)) {
+            throw new IllegalStateException("item tags not bound");
+        }
 
         List<BlockState> states = new ArrayList<>();
         Block.BLOCK_STATE_REGISTRY.forEach(states::add);
@@ -129,13 +152,14 @@ final class BlockRefGen {
     // region tags
 
     /**
-     * Binds every block tag from the vanilla data pack in the client jar. Without a server,
-     * nothing else loads tags, and {@code Holder.is(TagKey)} would throw.
+     * Binds every tag of {@code registry} from the vanilla data pack in the client jar
+     * ({@code data/minecraft/tags/<folder>/}). Without a server, nothing else loads tags, and
+     * {@code Holder.is(TagKey)} would throw.
      */
     @SuppressWarnings("unchecked")
-    private static void bindBlockTags() throws Exception {
+    private static <T> void bindTags(Registry<T> registry, String folder) throws Exception {
         Path jar = Path.of(Block.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-        String prefix = "data/minecraft/tags/block/";
+        String prefix = "data/minecraft/tags/" + folder + "/";
         Map<String, JsonArray> raw = new HashMap<>();
         try (ZipFile zip = new ZipFile(jar.toFile())) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -151,33 +175,30 @@ final class BlockRefGen {
                 }
             }
         }
-        Map<String, Set<Block>> resolved = new HashMap<>();
+        Map<String, Set<T>> resolved = new HashMap<>();
         for (String tag : raw.keySet()) {
-            resolveTag(tag, raw, resolved);
+            resolveTag(registry, tag, raw, resolved);
         }
-        Map<Block, List<TagKey<Block>>> byBlock = new HashMap<>();
-        resolved.forEach((tag, blocks) -> {
-            TagKey<Block> key = TagKey.create(Registries.BLOCK, Identifier.parse(tag));
-            for (Block block : blocks) {
-                byBlock.computeIfAbsent(block, b -> new ArrayList<>()).add(key);
+        Map<T, List<TagKey<T>>> byValue = new HashMap<>();
+        resolved.forEach((tag, values) -> {
+            TagKey<T> key = TagKey.create(registry.key(), Identifier.parse(tag));
+            for (T value : values) {
+                byValue.computeIfAbsent(value, b -> new ArrayList<>()).add(key);
             }
         });
         Method bindTags = Holder.Reference.class.getDeclaredMethod("bindTags", Collection.class);
         bindTags.setAccessible(true);
-        for (Holder.Reference<Block> holder : BuiltInRegistries.BLOCK.listElements().toList()) {
-            bindTags.invoke(holder, byBlock.getOrDefault(holder.value(), List.of()));
-        }
-        if (!Blocks.SOUL_FIRE.defaultBlockState().is(TagKey.create(Registries.BLOCK, Identifier.parse("minecraft:fire")))) {
-            throw new IllegalStateException("tags not bound");
+        for (Holder.Reference<T> holder : registry.listElements().toList()) {
+            bindTags.invoke(holder, byValue.getOrDefault(holder.value(), List.of()));
         }
     }
 
-    private static Set<Block> resolveTag(String tag, Map<String, JsonArray> raw, Map<String, Set<Block>> resolved) {
-        Set<Block> done = resolved.get(tag);
+    private static <T> Set<T> resolveTag(Registry<T> registry, String tag, Map<String, JsonArray> raw, Map<String, Set<T>> resolved) {
+        Set<T> done = resolved.get(tag);
         if (done != null) {
             return done;
         }
-        Set<Block> blocks = new HashSet<>();
+        Set<T> blocks = new HashSet<>();
         for (JsonElement value : raw.get(tag)) {
             String id;
             boolean required = true;
@@ -192,16 +213,16 @@ final class BlockRefGen {
             if (id.startsWith("#")) {
                 String ref = id.substring(1);
                 if (raw.containsKey(ref)) {
-                    blocks.addAll(resolveTag(ref, raw, resolved));
+                    blocks.addAll(resolveTag(registry, ref, raw, resolved));
                 } else if (required) {
                     throw new IllegalStateException("unknown tag " + ref + " in " + tag);
                 }
             } else {
-                var block = BuiltInRegistries.BLOCK.getOptional(Identifier.parse(id));
+                var block = registry.getOptional(Identifier.parse(id));
                 if (block.isPresent()) {
                     blocks.add(block.get());
                 } else if (required) {
-                    throw new IllegalStateException("unknown block " + id + " in " + tag);
+                    throw new IllegalStateException("unknown entry " + id + " in " + tag);
                 }
             }
         }
@@ -232,7 +253,7 @@ final class BlockRefGen {
         return c;
     }
 
-    private static JsonArray names(Block... blocks) {
+    static JsonArray names(Block... blocks) {
         JsonArray a = new JsonArray();
         for (Block b : blocks) {
             a.add(BuiltInRegistries.BLOCK.getKey(b).toString());
@@ -241,10 +262,11 @@ final class BlockRefGen {
     }
 
     /**
-     * Resets every setting, then applies {@code config}.
+     * Resets every setting, then applies {@code config}. Lists hold registry ids (blocks or
+     * items, from the setting's type); numbers take the type of the setting.
      */
     @SuppressWarnings("unchecked")
-    private static void apply(JsonObject config) throws ReflectiveOperationException {
+    static void apply(JsonObject config) throws ReflectiveOperationException {
         Settings settings = BaritoneAPI.getSettings();
         for (Settings.Setting<?> setting : settings.allSettings) {
             setting.reset();
@@ -252,14 +274,31 @@ final class BlockRefGen {
         for (String key : config.keySet()) {
             Settings.Setting<Object> setting = (Settings.Setting<Object>) Settings.class.getField(key).get(settings);
             JsonElement value = config.get(key);
+            Object old = setting.defaultValue;
             if (value.isJsonArray()) {
-                List<Block> blocks = new ArrayList<>();
-                for (JsonElement e : value.getAsJsonArray()) {
-                    blocks.add(BuiltInRegistries.BLOCK.getValue(Identifier.parse(e.getAsString())));
+                Type element = ((ParameterizedType) setting.getType()).getActualTypeArguments()[0];
+                Registry<?> registry = element == Block.class ? BuiltInRegistries.BLOCK
+                        : element == Item.class ? BuiltInRegistries.ITEM : null;
+                if (registry == null) {
+                    throw new IllegalArgumentException(key + " is a list of " + element);
                 }
-                setting.value = blocks;
-            } else {
+                List<Object> values = new ArrayList<>();
+                for (JsonElement e : value.getAsJsonArray()) {
+                    values.add(registry.getValue(Identifier.parse(e.getAsString())));
+                }
+                setting.value = values;
+            } else if (old instanceof Boolean) {
                 setting.value = value.getAsBoolean();
+            } else if (old instanceof Integer) {
+                setting.value = value.getAsInt();
+            } else if (old instanceof Long) {
+                setting.value = value.getAsLong();
+            } else if (old instanceof Double) {
+                setting.value = value.getAsDouble();
+            } else if (old instanceof Float) {
+                setting.value = value.getAsFloat();
+            } else {
+                throw new IllegalArgumentException(key + " has type " + old.getClass());
             }
         }
     }
@@ -277,15 +316,46 @@ final class BlockRefGen {
         base.add("blocksToAvoid", new JsonArray());
         apply(base);
 
+        List<TagKey<Block>> toolTags = toolTags();
         JsonArray out = new JsonArray();
         for (BlockState state : states) {
-            out.add(traits(state));
+            JsonObject t = traits(state);
+            flag(t, "default", state == state.getBlock().defaultBlockState());
+            JsonArray tags = new JsonArray();
+            for (TagKey<Block> tag : toolTags) {
+                if (state.is(tag)) {
+                    tags.add(tag.location().toString());
+                }
+            }
+            if (!tags.isEmpty()) {
+                t.add("tags", tags);
+            }
+            out.add(t);
         }
         JsonObject table = new JsonObject();
-        table.addProperty("version", 1);
+        table.addProperty("version", 2);
         table.addProperty("air", Block.BLOCK_STATE_REGISTRY.getId(Blocks.AIR.defaultBlockState()));
         table.add("states", out);
         return table;
+    }
+
+    /**
+     * The block tags that item tool rules refer to, sorted: the tags the host must send.
+     */
+    static List<TagKey<Block>> toolTags() {
+        Set<TagKey<Block>> tags = new HashSet<>();
+        for (Item item : BuiltInRegistries.ITEM) {
+            Tool tool = item.components().get(DataComponents.TOOL);
+            if (tool == null) {
+                continue;
+            }
+            for (Tool.Rule rule : tool.rules()) {
+                rule.blocks().unwrapKey().ifPresent(tags::add);
+            }
+        }
+        List<TagKey<Block>> sorted = new ArrayList<>(tags);
+        sorted.sort(Comparator.comparing(t -> t.location().toString()));
+        return sorted;
     }
 
     private static JsonObject traits(BlockState state) throws ReflectiveOperationException {
@@ -503,14 +573,10 @@ final class BlockRefGen {
         }
 
         static FakeBsi create(Map<Long, BlockState> blocks, Set<Long> unloadedChunks, WorldBorder border) throws Exception {
-            Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
-            theUnsafe.setAccessible(true);
-            FakeBsi bsi = (FakeBsi) ((sun.misc.Unsafe) theUnsafe.get(null)).allocateInstance(FakeBsi.class);
+            FakeBsi bsi = allocate(FakeBsi.class);
             bsi.blocks = blocks;
             bsi.unloadedChunks = unloadedChunks;
-            Field worldBorder = BlockStateInterface.class.getDeclaredField("worldBorder");
-            worldBorder.setAccessible(true);
-            worldBorder.set(bsi, new BetterWorldBorder(border));
+            setField(BlockStateInterface.class, bsi, "worldBorder", new BetterWorldBorder(border));
             return bsi;
         }
 
@@ -539,9 +605,28 @@ final class BlockRefGen {
     }
 
     /**
+     * An instance of {@code clazz} created without running a constructor.
+     */
+    @SuppressWarnings("unchecked")
+    static <T> T allocate(Class<T> clazz) throws Exception {
+        Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        return (T) ((sun.misc.Unsafe) theUnsafe.get(null)).allocateInstance(clazz);
+    }
+
+    /**
+     * Sets a (possibly private or final) field declared by {@code owner}.
+     */
+    static void setField(Class<?> owner, Object target, String name, Object value) throws ReflectiveOperationException {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    /**
      * Blocks that the position checks treat specially, drawn more often than a uniform pick.
      */
-    private static final List<Block> INTERESTING = List.of(
+    static final List<Block> INTERESTING = List.of(
                 Blocks.WATER, Blocks.LAVA, Blocks.BUBBLE_COLUMN, Blocks.KELP, Blocks.KELP_PLANT, Blocks.SEAGRASS,
                 Blocks.SNOW, Blocks.CARPET.white(), Blocks.MOSS_CARPET, Blocks.PALE_MOSS_CARPET, Blocks.LILY_PAD,
                 Blocks.SAND, Blocks.GRAVEL, Blocks.RED_SAND, Blocks.ANVIL,
@@ -553,7 +638,7 @@ final class BlockRefGen {
                 Blocks.FARMLAND, Blocks.DIRT_PATH, Blocks.CHEST, Blocks.CACTUS, Blocks.POWDER_SNOW, Blocks.TRIPWIRE,
                 Blocks.DIRT, Blocks.OAK_SIGN, Blocks.TORCH, Blocks.CAULDRON, Blocks.WATER_CAULDRON, Blocks.AZALEA);
 
-    private static BlockState anyStateOf(Block block) {
+    static BlockState anyStateOf(Block block) {
         List<BlockState> states = block.getStateDefinition().getPossibleStates();
         return states.get(R.nextInt(states.size()));
     }

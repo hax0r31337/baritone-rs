@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates tests/fixtures/reference/math_goals.json, tests/fixtures/reference/blocks.json.gz
+# Regenerates tests/fixtures/reference/{math_goals.json,blocks.json.gz,paths.json.gz}
 # and src/mc/mth_tables.rs by running the real upstream Baritone classes against the real
 # Minecraft client jar (registries bootstrapped, block tags bound from its data pack).
 #
@@ -15,6 +15,7 @@ CACHE="$ROOT/target/refgen-cache"
 BUILD="$ROOT/target/refgen-build"
 OUT="$ROOT/tests/fixtures/reference/math_goals.json"
 BLOCKS_OUT="$ROOT/tests/fixtures/reference/blocks.json.gz"
+PATHS_OUT="$ROOT/tests/fixtures/reference/paths.json.gz"
 MTH_TABLES="$ROOT/src/mc/mth_tables.rs"
 
 head="$(git -C "$BARITONE" rev-parse HEAD)"
@@ -31,6 +32,8 @@ JARS=(
     "c376b13067cc99a5774403530953f7b05a91e218 https://libraries.minecraft.net/com/google/guava/guava/33.6.0-jre/guava-33.6.0-jre.jar"
     "add8754cda96cf0cd840441632875648836f8a71 https://libraries.minecraft.net/com/mojang/authlib/10.0.77/authlib-10.0.77.jar"
     "3373d1e7bf00c8b99bed1ea4efb8c47344e4a887 https://libraries.minecraft.net/com/mojang/brigadier/1.3.11/brigadier-1.3.11.jar"
+    # Minecraft.<clinit> (reached through Baritone's Helper) creates a tracy section category
+    "cc2ad81342001b4281c305a298d7f50332354058 https://libraries.minecraft.net/com/mojang/jtracy/1.14.38/jtracy-1.14.38.jar"
     "b6b2ae770c02e0c1eb90f9985b151e9085a38d0b https://libraries.minecraft.net/com/mojang/datafixerupper/10.0.21/datafixerupper-10.0.21.jar"
     "351cea64a5233361327d8d54c44277041beed97f https://libraries.minecraft.net/com/mojang/logging/1.7.12/logging-1.7.12.jar"
     "05397ef65dcb60670e0e0dba4854522873af3070 https://libraries.minecraft.net/io/netty/netty-buffer/4.2.16.Final/netty-buffer-4.2.16.Final.jar"
@@ -80,6 +83,21 @@ SOURCES=(
     "$MAIN/pathing/precompute/PrecomputedData.java"
     "$MAIN/utils/BlockStateInterface.java"
     "$MAIN/utils/pathing/BetterWorldBorder.java"
+    "$MAIN/pathing/calc/AStarPathFinder.java"
+    "$MAIN/pathing/calc/AbstractNodeCostSearch.java"
+    "$MAIN/pathing/calc/Path.java"
+    "$MAIN/pathing/calc/PathNode.java"
+    "$MAIN/pathing/calc/openset/BinaryHeapOpenSet.java"
+    "$MAIN/pathing/movement/CalculationContext.java"
+    "$MAIN/pathing/movement/Movement.java"
+    "$MAIN/pathing/movement/Moves.java"
+    "$MAIN"/pathing/movement/movements/*.java
+    "$MAIN/pathing/path/CutoffPath.java"
+    "$MAIN/utils/ToolSet.java"
+    "$MAIN/utils/pathing/Avoidance.java"
+    "$MAIN/utils/pathing/Favoring.java"
+    "$MAIN/utils/pathing/MutableMoveResult.java"
+    "$MAIN/utils/pathing/PathBase.java"
 )
 
 rm -rf "$BUILD"
@@ -88,5 +106,5 @@ javac -nowarn -encoding UTF-8 -d "$BUILD" -cp "$CP" \
     -sourcepath "$BARITONE/src/main/java:$BARITONE/src/api/java:$BARITONE/src/schematica_api/java" \
     $(find "$ROOT/tools/refgen/stubs" "$ROOT/tools/refgen/src" -name '*.java') \
     "${SOURCES[@]}"
-java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES" "$BLOCKS_OUT"
-echo "wrote $OUT, $BLOCKS_OUT and $MTH_TABLES"
+java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES" "$BLOCKS_OUT" "$PATHS_OUT"
+echo "wrote $OUT, $BLOCKS_OUT, $PATHS_OUT and $MTH_TABLES"
