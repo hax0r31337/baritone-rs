@@ -1,0 +1,25 @@
+pub mod goal;
+pub mod goal_axis;
+pub mod goal_block;
+pub mod goal_composite;
+pub mod goal_get_to_block;
+pub mod goal_inverted;
+pub mod goal_near;
+pub mod goal_run_away;
+pub mod goal_strict_direction;
+pub mod goal_two_blocks;
+pub mod goal_xz;
+pub mod goal_y_level;
+
+pub use goal::{Goal, goal_equals};
+pub use goal_axis::GoalAxis;
+pub use goal_block::GoalBlock;
+pub use goal_composite::GoalComposite;
+pub use goal_get_to_block::GoalGetToBlock;
+pub use goal_inverted::GoalInverted;
+pub use goal_near::GoalNear;
+pub use goal_run_away::GoalRunAway;
+pub use goal_strict_direction::GoalStrictDirection;
+pub use goal_two_blocks::GoalTwoBlocks;
+pub use goal_xz::GoalXZ;
+pub use goal_y_level::GoalYLevel;
