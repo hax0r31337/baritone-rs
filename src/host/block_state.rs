@@ -267,8 +267,8 @@ pub struct BlockState {
     pub chest_like: bool,
     /// Java `BonemealableBlock` whose `isValidBonemealTarget` and `isBonemealSuccess` both
     /// hold for this state alone in an otherwise empty world, with the luckiest roll: bone
-    /// meal would grow it. Upstream asks the world (bamboo checks its height, saplings roll
-    /// the dice); the host evaluates the state on its own.
+    /// meal would grow it. Upstream asks the world; the host evaluates the state on its own.
+    /// Farm does not read it for bamboo, whose check it ports (the stalk's height and stage).
     #[serde(default)]
     pub bonemealable: bool,
 

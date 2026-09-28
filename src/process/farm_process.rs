@@ -5,7 +5,8 @@
 //
 // Blocks are the host's: `Blocks.X` and `instanceof XxxBlock` are block names, crop ages are
 // the `age` property (`CropBlock.isMaxAge` against the crop's maximum age), and
-// `BonemealableBlock`'s checks are the `bonemealable` trait. Items are item ids.
+// `BonemealableBlock`'s checks are the `bonemealable` trait, except for bamboo, whose check
+// (the stalk's height and its top's `stage` property) is ported here. Items are item ids.
 //
 // `locations` is shared with the scan that runs on the executor. `onTick` holds it
 // throughout, so a scan started during a tick lands after it; upstream races the two. The
@@ -34,6 +35,11 @@ use crate::settings::settings;
 const FARMLAND: &str = "minecraft:farmland";
 const SOUL_SAND: &str = "minecraft:soul_sand";
 const JUNGLE_LOG: &str = "minecraft:jungle_log";
+const BAMBOO: &str = "minecraft:bamboo";
+/// `BambooStalkBlock.MAX_HEIGHT`
+const BAMBOO_MAX_HEIGHT: i32 = 16;
+/// `BambooStalkBlock.STAGE_DONE_GROWING`
+const BAMBOO_STAGE_DONE_GROWING: i32 = 1;
 
 const FARMLAND_PLANTABLE: [&str; 6] = [
     "minecraft:beetroot_seeds",
@@ -149,11 +155,45 @@ impl Harvest {
 
 /// The `age` property.
 fn age(state: &BlockState) -> i32 {
+    int_property(state, "age")
+}
+
+fn int_property(state: &BlockState, name: &str) -> i32 {
     state
         .properties
-        .get("age")
-        .and_then(|age| age.parse().ok())
+        .get(name)
+        .and_then(|value| value.parse().ok())
         .unwrap_or(0)
+}
+
+/// `BonemealableBlock.isValidBonemealTarget && isBonemealSuccess`: the `bonemealable` trait,
+/// except for bamboo, whose check asks the stalk (`BambooStalkBlock`, which always succeeds).
+fn is_bonemealable(world: &World, pos: BetterBlockPos, state: &BlockState) -> bool {
+    if state.name != BAMBOO {
+        return state.bonemealable;
+    }
+    let i = bamboo_height_above_up_to_max(world, pos);
+    let j = bamboo_height_below_up_to_max(world, pos);
+    i + j + 1 < BAMBOO_MAX_HEIGHT
+        && int_property(world.get_block_state(pos.above_n(i)), "stage") != BAMBOO_STAGE_DONE_GROWING
+}
+
+/// `BambooStalkBlock.getHeightAboveUpToMax`
+fn bamboo_height_above_up_to_max(world: &World, pos: BetterBlockPos) -> i32 {
+    let mut i = 0;
+    while i < BAMBOO_MAX_HEIGHT && world.get_block_state(pos.above_n(i + 1)).name == BAMBOO {
+        i += 1;
+    }
+    i
+}
+
+/// `BambooStalkBlock.getHeightBelowUpToMax`
+fn bamboo_height_below_up_to_max(world: &World, pos: BetterBlockPos) -> i32 {
+    let mut i = 0;
+    while i < BAMBOO_MAX_HEIGHT && world.get_block_state(pos.below_n(i + 1)).name == BAMBOO {
+        i += 1;
+    }
+    i
 }
 
 fn ready_for_harvest(world: &World, pos: BetterBlockPos, state: &BlockState) -> bool {
@@ -295,7 +335,7 @@ impl IBaritoneProcess for FarmProcess {
                 to_break.push(pos);
                 continue;
             }
-            if state.bonemealable {
+            if is_bonemealable(&world, pos, state) {
                 bonemealable.push(pos);
             }
         }
@@ -527,5 +567,86 @@ impl IBaritoneProcess for FarmProcess {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{BlockStateTable, Chunk, DimensionType};
+
+    const AIR: u32 = 0;
+    const GROWING: u32 = 1;
+    const DONE: u32 = 2;
+    const WHEAT: u32 = 3;
+
+    fn world() -> World {
+        let bamboo = |stage: &str| BlockState {
+            name: BAMBOO.to_owned(),
+            properties: [("stage".to_owned(), stage.to_owned())].into(),
+            // what the host sends: the state alone, in an empty world
+            bonemealable: stage == "0",
+            ..BlockState::default()
+        };
+        let table = BlockStateTable::new(
+            vec![
+                BlockState {
+                    name: "minecraft:air".to_owned(),
+                    air: true,
+                    ..BlockState::default()
+                },
+                bamboo("0"),
+                bamboo("1"),
+                BlockState {
+                    name: "minecraft:wheat".to_owned(),
+                    bonemealable: true,
+                    ..BlockState::default()
+                },
+            ],
+            AIR,
+        )
+        .unwrap();
+        let dimension = DimensionType {
+            min_y: 0,
+            height: 32,
+            water_evaporates: false,
+        };
+        let mut world = World::new(Arc::new(table), dimension).unwrap();
+        world
+            .load_chunk(0, 0, Chunk::new(dimension.section_count()))
+            .unwrap();
+        world
+    }
+
+    fn bonemealable(world: &World, x: i32, y: i32) -> bool {
+        let pos = BetterBlockPos::new(x, y, 0);
+        is_bonemealable(world, pos, world.get_block_state(pos))
+    }
+
+    #[test]
+    fn bamboo_asks_its_stalk() {
+        let mut world = world();
+        // a grown stalk: only its top is done growing
+        world.set_block(0, 0, 0, GROWING).unwrap();
+        world.set_block(0, 1, 0, GROWING).unwrap();
+        world.set_block(0, 2, 0, DONE).unwrap();
+        for y in 0..3 {
+            assert!(!bonemealable(&world, 0, y), "grown stalk at y = {y}");
+        }
+        // still growing
+        world.set_block(0, 2, 0, GROWING).unwrap();
+        assert!(bonemealable(&world, 0, 0));
+        assert!(bonemealable(&world, 0, 2));
+        // 15 blocks tall grows, 16 does not, whatever the stage
+        for y in 0..15 {
+            world.set_block(1, y, 0, GROWING).unwrap();
+        }
+        assert!(bonemealable(&world, 1, 0));
+        world.set_block(1, 15, 0, GROWING).unwrap();
+        assert!(!bonemealable(&world, 1, 0));
+        assert!(!bonemealable(&world, 1, 15));
+        // other blocks are the trait
+        world.set_block(2, 0, 0, WHEAT).unwrap();
+        assert!(bonemealable(&world, 2, 0));
     }
 }

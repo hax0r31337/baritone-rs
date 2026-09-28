@@ -95,6 +95,7 @@ import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BambooStalkBlock;
 import net.minecraft.world.level.block.BeetrootBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -2321,6 +2322,18 @@ final class ExecRefGen {
         list.add(new Scenario("farm", farm, start, null, farming, 0, processConfig(), 600)
                 .process("type", "farm", "range", 0)
                 .entities(item(4, -5.5, 1.0, -1.5, Items.WHEAT)));
+
+        // farm: a grown bamboo stalk (its top done growing) with its base in reach and the block
+        // above not: bone meal would not grow the stalk, so the player walks up and harvests it
+        ExecWorld bamboo = flat();
+        BlockState stalk = Blocks.BAMBOO.defaultBlockState().setValue(BambooStalkBlock.AGE, 1);
+        bamboo.set(4, 1, 2, stalk);
+        bamboo.set(4, 2, 2, stalk);
+        bamboo.set(4, 3, 2, stalk.setValue(BambooStalkBlock.STAGE, BambooStalkBlock.STAGE_DONE_GROWING));
+        ItemStack[] boneMeal = basicItems();
+        boneMeal[3] = stack(Items.BONE_MEAL, 8);
+        list.add(new Scenario("farm_grown_bamboo", bamboo, start, null, boneMeal, 0, processConfig(), 150)
+                .process("type", "farm", "range", 0));
 
         // backfill: the wall dug through is filled in again behind the player
         ExecWorld wall = flat();
