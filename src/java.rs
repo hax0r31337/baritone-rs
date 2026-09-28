@@ -304,8 +304,9 @@ impl Executor {
 /// A `java.util.HashMap`, where upstream iterates one: iteration follows Java's order, which
 /// is the order of the table's buckets and, within a bucket, insertion order. The bucket
 /// depends on the key's `hashCode()` (the `hash` function the map is made with) and on the
-/// table's capacity, which grows like Java's and never shrinks. Buckets that Java turns into
-/// trees (8 entries in one bucket of a table of 64 or more) keep insertion order here, which
+/// table's capacity, which grows like Java's and never shrinks: past the load factor, and when
+/// a bucket of a table smaller than 64 gets its 9th entry. Buckets that Java turns into trees
+/// (a 9th entry in one bucket of a table of 64 or more) keep insertion order here, which
 /// Java's does not always. Lookups are linear: the maps this is used for stay small.
 #[derive(Clone)]
 pub struct JavaHashMap<K, V> {
@@ -327,6 +328,8 @@ impl<K: PartialEq + fmt::Debug, V: fmt::Debug> fmt::Debug for JavaHashMap<K, V> 
 impl<K: PartialEq, V> JavaHashMap<K, V> {
     const DEFAULT_INITIAL_CAPACITY: usize = 16;
     const LOAD_FACTOR: f32 = 0.75;
+    const TREEIFY_THRESHOLD: usize = 8;
+    const MIN_TREEIFY_CAPACITY: usize = 64;
 
     /// `new HashMap<>()`, for keys whose `hashCode()` is `hash`.
     pub fn new(hash: fn(&K) -> i32) -> Self {
@@ -383,7 +386,17 @@ impl<K: PartialEq, V> JavaHashMap<K, V> {
         if let Some((_, v)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
             return Some(std::mem::replace(v, value));
         }
+        let bucket = self.bucket(&key);
+        let bin_count = self
+            .entries
+            .iter()
+            .filter(|(k, _)| self.bucket(k) == bucket)
+            .count();
         self.entries.push((key, value));
+        // treeifyBin: a small table grows instead of making the bucket a tree
+        if bin_count >= Self::TREEIFY_THRESHOLD && self.capacity < Self::MIN_TREEIFY_CAPACITY {
+            self.resize();
+        }
         if self.entries.len() > self.threshold {
             self.resize();
         }
@@ -403,12 +416,8 @@ impl<K: PartialEq, V> JavaHashMap<K, V> {
     /// The entries in Java's iteration order.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         let mut order: Vec<usize> = (0..self.entries.len()).collect();
-        let mask = self.capacity.wrapping_sub(1);
         // stable: insertion order within a bucket
-        order.sort_by_key(|&i| {
-            let h = (self.hash)(&self.entries[i].0) as u32;
-            (h ^ (h >> 16)) as usize & mask
-        });
+        order.sort_by_key(|&i| self.bucket(&self.entries[i].0));
         order.into_iter().map(|i| {
             let (k, v) = &self.entries[i];
             (k, v)
@@ -418,6 +427,12 @@ impl<K: PartialEq, V> JavaHashMap<K, V> {
     /// `keySet()`, in Java's iteration order.
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
+    }
+
+    /// The key's bucket in the current table: `(h = key.hashCode()) ^ (h >>> 16)`, masked.
+    fn bucket(&self, key: &K) -> usize {
+        let h = (self.hash)(key) as u32;
+        (h ^ (h >> 16)) as usize & self.capacity.wrapping_sub(1)
     }
 
     fn resize(&mut self) {
@@ -581,6 +596,56 @@ mod tests {
         empty.insert(BetterBlockPos::new(16, 0, 0), 0);
         empty.insert(BetterBlockPos::new(0, 0, 0), 1);
         assert_eq!(keys(&empty), parse("16,0,0 0,0,0"));
+
+        // (k, k, 0) all hash to 32 * k: one bucket until the table has 64 slots
+        let staircase = |k: i32| BetterBlockPos::new(k, k, 0);
+        let mut m = JavaHashMap::new(hash);
+        for k in 0..9 {
+            m.insert(staircase(k), k);
+        }
+        assert_eq!(
+            keys(&m),
+            parse("0,0,0 1,1,0 2,2,0 3,3,0 4,4,0 5,5,0 6,6,0 7,7,0 8,8,0")
+        );
+        for k in 9..14 {
+            m.insert(staircase(k), k);
+        }
+        assert_eq!(
+            keys(&m),
+            parse(
+                "0,0,0 2,2,0 4,4,0 6,6,0 8,8,0 10,10,0 12,12,0 \
+                 1,1,0 3,3,0 5,5,0 7,7,0 9,9,0 11,11,0 13,13,0"
+            )
+        );
+
+        let mut m = JavaHashMap::new(hash);
+        for k in 0..8 {
+            m.insert(staircase(k), k);
+        }
+        m.insert(BetterBlockPos::new(1, 0, 0), 100);
+        m.insert(BetterBlockPos::new(3, 0, 5), 101);
+        m.insert(BetterBlockPos::new(16, 0, 0), 102);
+        m.remove(&staircase(2));
+        m.insert(staircase(8), 8);
+        assert_eq!(
+            keys(&m),
+            parse("0,0,0 1,1,0 3,3,0 4,4,0 5,5,0 6,6,0 7,7,0 8,8,0 1,0,0 3,0,5 16,0,0")
+        );
+        m.insert(staircase(9), 9);
+        assert_eq!(
+            keys(&m),
+            parse("0,0,0 4,4,0 6,6,0 8,8,0 1,0,0 3,0,5 16,0,0 1,1,0 3,3,0 5,5,0 7,7,0 9,9,0")
+        );
+
+        let mut m = JavaHashMap::new(hash);
+        for k in 0..10 {
+            m.insert(staircase(k), k);
+        }
+        m.insert(BetterBlockPos::new(16, 0, 0), 16);
+        m.remove(&staircase(1));
+        let expected = parse("0,0,0 2,2,0 4,4,0 6,6,0 8,8,0 16,0,0 3,3,0 5,5,0 7,7,0 9,9,0");
+        assert_eq!(keys(&m), expected);
+        assert_eq!(keys(&JavaHashMap::copy_of(&m)), expected);
     }
 
     #[test]
