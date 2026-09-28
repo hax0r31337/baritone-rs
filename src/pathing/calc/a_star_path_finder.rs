@@ -110,18 +110,16 @@ impl AStarPathFinder {
                 settings_now.slow_path_timeout_ms, primary_timeout
             ));
         }
-        let primary_timeout_time = start_time
-            + if slow_path {
-                settings_now.slow_path_timeout_ms
-            } else {
-                primary_timeout
-            };
-        let failure_timeout_time = start_time
-            + if slow_path {
-                settings_now.slow_path_timeout_ms
-            } else {
-                failure_timeout
-            };
+        let primary_timeout_time = start_time.wrapping_add(if slow_path {
+            settings_now.slow_path_timeout_ms
+        } else {
+            primary_timeout
+        });
+        let failure_timeout_time = start_time.wrapping_add(if slow_path {
+            settings_now.slow_path_timeout_ms
+        } else {
+            failure_timeout
+        });
         let mut failing = true;
         let mut num_nodes: i32 = 0;
         let mut num_movements_considered: i32 = 0;
@@ -143,7 +141,8 @@ impl AStarPathFinder {
             if (num_nodes & (time_check_interval - 1)) == 0 {
                 // only call this once every 64 nodes (about half a millisecond)
                 let now = current_time_millis(); // since nanoTime is slow on windows (takes many microseconds)
-                if now - failure_timeout_time >= 0 || (!failing && now - primary_timeout_time >= 0)
+                if now.wrapping_sub(failure_timeout_time) >= 0
+                    || (!failing && now.wrapping_sub(primary_timeout_time) >= 0)
                 {
                     break;
                 }
@@ -429,7 +428,9 @@ mod tests {
         let start = Instant::now();
         let result = finder.calculate(2, 10);
         let elapsed = start.elapsed().as_millis();
-        assert!((10..1000).contains(&elapsed), "took {elapsed}ms");
+        // the search reads whole milliseconds (like currentTimeMillis), so a timeout can end up
+        // to 1ms short of real time
+        assert!((9..1000).contains(&elapsed), "took {elapsed}ms");
         assert_eq!(result.get_type(), Type::Failure);
         assert_stopped_early(&finder);
     }
@@ -442,9 +443,23 @@ mod tests {
         let start = Instant::now();
         let result = finder.calculate(5, 5_000);
         let elapsed = start.elapsed().as_millis();
-        assert!((5..1000).contains(&elapsed), "took {elapsed}ms");
+        assert!((4..1000).contains(&elapsed), "took {elapsed}ms"); // see failure_timeout
         assert_eq!(result.get_type(), Type::SuccessSegment);
         assert_stopped_early(&finder);
+    }
+
+    #[test]
+    fn huge_timeouts_never_expire() {
+        let world = flat_world();
+        // upstream's `startTime + timeout` and `now - timeoutTime >= 0` wrap, so a timeout of
+        // Long.MAX_VALUE never fires (and must not overflow in a debug build). The clock starts
+        // at 0 on first use, where `startTime + Long.MAX_VALUE` would not overflow yet.
+        while current_time_millis() < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut finder = finder(&world, Arc::new(GoalXZ::new(20, -7)));
+        let result = finder.calculate(i64::MAX, i64::MAX);
+        assert_eq!(result.get_type(), Type::SuccessToGoal);
     }
 
     #[test]
