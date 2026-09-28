@@ -2,9 +2,12 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// `net.minecraft.core.Direction`. The discriminant is the Java ordinal, which is also the 3D
-/// data value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// data value. Serialized by its Minecraft name (`"north"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum Direction {
     Down = 0,

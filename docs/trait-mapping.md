@@ -2,23 +2,33 @@
 
 This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) that asks about Minecraft
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
-upstream diffs. Trait names are provisional until phase 2 defines the trait table. The field list is at
-the end. Locations are `File.java:line`; every file name used here is unique in the kept scope.
-`MH` = `MovementHelper.java`.
+upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
+table version 1); the field list is at the end. Locations are `File.java:line`; every file name used
+here is unique in the kept scope. `MH` = `MovementHelper.java`.
+
+`tools/refgen` exports the whole table from a real 26.3 client (`tests/fixtures/reference/blocks.json.gz`),
+and `tests/reference_block_states.rs` checks the Rust side of every row it can reach (the tri-states,
+the MovementHelper block checks, PrecomputedData, BetterWorldBorder) against the real upstream code, for
+every state and in random worlds. When a new check needs a new field: add it to `BlockState`, export it
+in `BlockRefGen.traits`, bump `BlockStateTable::VERSION`, and add a row here.
 
 ## Caveats
 
 - **Tri-states depend on settings.** `PrecomputedData` is rebuilt for each `CalculationContext`
-  (`CalculationContext.java:95`), and the `*BlockState` functions read settings. If the host sends
+  (`CalculationContext.java:95`), and the `*BlockState` functions read settings. The host sends
   `can_walk_on` / `can_walk_through` / `fully_passable` computed with upstream defaults
   (`allowWalkOnMagmaBlocks=false`, `allowVines=false`, `assumeWalkOnLava=false`,
-  `allowWalkOnBottomSlab=true`, `blocksToAvoid=[]`), Rust must apply these overrides when it builds
-  its per-context table:
-  - `can_walk_on`: `hot_floor && allowWalkOnMagmaBlocks` → YES; `climbable ∈ {Vine, NetherVine} && allowVines`
-    → YES; `fluid == Lava && assumeWalkOnLava` → MAYBE; `slab == Bottom && fluid == None && !allowWalkOnBottomSlab` → NO.
+  `allowWalkOnBottomSlab=true`) and `blocksToAvoid=[]`. `movement_helper::*_block_state` apply the
+  actual settings on top:
+  - `can_walk_on`: `hot_floor && normal_cube && allowWalkOnMagmaBlocks` → YES;
+    `climbable ∈ {Vine, NetherVine} && allowVines` → YES; `fluid == Lava && assumeWalkOnLava` and the
+    host said NO → MAYBE; `slab == Bottom && fluid == Empty && !allowWalkOnBottomSlab` → NO.
   - `can_walk_through`: `!air && blocksToAvoid ∋ name` → NO. The default `blocksToAvoid` is `[tripwire]`
     (Settings.java:240).
   - `fully_passable`: no settings are involved.
+- **No chunk cache.** Upstream's snow checks return true when the chunk is not loaded (MH:198,313),
+  for snow read from the cache. The port reads air for unloaded chunks, so these branches are
+  unreachable; they are kept for fidelity.
 - **Upstream quirks to keep, not fix:**
   - `MovementDiagonal.java:169` tests `cuttingOver1` for magma a second time; it should test `cuttingOver2`.
   - `fully_passable` uses `SkullBlock`, which covers floor skulls only. `can_walk_through` uses
@@ -34,7 +44,7 @@ the end. Locations are `File.java:line`; every file name used here is unique in 
 
 | Upstream | Proposed trait | Locations | What the check does |
 |---|---|---|---|
-| `AIR` | `air` + a host-designated air state id | BlockStateInterface.java:56,101,170-171 | Returned for out-of-range Y, unloaded chunks and empty sections |
+| `AIR` | `air` + the table's air state (`BlockStateTable::air`) | BlockStateInterface.java:56,101,170-171 | Returned for out-of-range Y, unloaded chunks and empty sections |
 | `BAMBOO` | `name` | FarmProcess.java:91,134 | Farm pickup item list; harvest target |
 | `BEDROCK` | `name` | MineProcess.java:497 | Bedrock both above and below → `plausibleToBreak` is false |
 | `BEETROOTS` | `name` + `properties.age` | FarmProcess.java:120 | Crop harvest target (max age 3) |
@@ -59,7 +69,7 @@ the end. Locations are `File.java:line`; every file name used here is unique in 
 | `IRON_DOOR` | `hand_openable = false` | MH:160; MovementTraverse.java:228 | Two uses: walk-through NO (the door cannot be opened), and Traverse does not right-click it |
 | `JUNGLE_LOG` | `name` | FarmProcess.java:204,246 | Cocoa planting support |
 | `LADDER` | `climbable = Ladder`; `fully_passable` (NO); `can_walk_on` (YES); `facing` | MH:243,416,595; MovementDescend.java:117; MovementDownward.java:66; MovementFall.java:170; MovementParkour.java:272 | Several uses: climbable, never fully passable, always walk-on, Descend/Downward/Parkour ladder cases, Fall reads `FACING` to steer away |
-| `LARGE_FERN` | `replaceable` | MH:319 | Forced replaceable (double plant) |
+| `LARGE_FERN` | `replaceable` | MH:319 | Forced replaceable (double plant). `canBeReplaced()` is already true in 26.3 (refgen asserts it), so the port drops the check |
 | `LAVA` | `liquid_block && fluid == Lava` | MH:857 | `isTransparent` (MineProcess exposed-ore check) |
 | `LILY_PAD` | `lily_pad` | MH:456; MovementPillar.java:100; MovementTraverse.java:165 | Water under a lily pad can be walked on; cannot pillar or backplace while standing on one over fluid |
 | `MAGMA_BLOCK` | `hot_floor` (new) | MH:374,410; MovementAscend.java:136,194; MovementDescend.java:260; MovementDiagonal.java:146,160,165,169,280; MovementFall.java:99; MovementParkour.java:105,265; MovementTraverse.java:102,224 | Several uses, gated by `allowWalkOnMagmaBlocks`: avoid_walking_into, walk-on, sneak cost, sneak input, no diagonal cut-over, parkour max jump 2 |
@@ -75,7 +85,7 @@ the end. Locations are `File.java:line`; every file name used here is unique in 
 | `STONE` | `name` lookup → `hardness`/tool data | InventoryBehavior.java:72 | Picks the best pickaxe to keep on the hotbar |
 | `SUGAR_CANE` | `name` | FarmProcess.java:90,125 | Farm pickup item; harvest target |
 | `SWEET_BERRY_BUSH` | `can_walk_through` (NO), `avoid_walking_into` | MH:146,376 | Damages the player |
-| `TALL_GRASS` | `replaceable` | MH:319 | Forced replaceable (double plant) |
+| `TALL_GRASS` | `replaceable` | MH:319 | Same as `LARGE_FERN` |
 | `TRAPPED_CHEST` | `chest_like`; `can_walk_on` (YES) | MH:422; GetToBlockProcess.java:246,254 | Same as `CHEST` |
 | `TRIPWIRE` | `fully_passable` (NO); `name` | MH:240; Settings.java:241 | Never fully passable; also in the default `blocksToAvoid` |
 | `TWISTING_VINES` | `climbable = NetherVine` | MH:599 | `isClimbable` |
@@ -106,7 +116,7 @@ the end. Locations are `File.java:line`; every file name used here is unique in 
 | `EndPortalBlock` | `fully_passable` (NO) | MH:251 | |
 | `FallingBlock` | `falls` | MH:93,629; MovementAscend.java:96; MovementDescend.java:138; MovementPillar.java:113,118; MineProcess.java:261 | Several uses: avoid breaking next to an unsupported falling block, add the cost of the falling stack, block the move if something would fall on the player, mining goal shape |
 | `FenceGateBlock` | `openable = FenceGate` (+ `open`) | MH:158,247,344; MovementPillar.java:73; MovementTraverse.java:236 | Walk-through YES; never fully passable; cannot pillar into one (#172); right-click to open |
-| `FlowingFluid` (fluid type) | `fluid != None` | MH:758,764 | `possiblyFlowing` / `isFlowing` guard |
+| `FlowingFluid` (fluid type) | `fluid != Empty` | MH:758,764 | `possiblyFlowing` / `isFlowing` guard |
 | `InfestedBlock` | `avoid_breaking` | MH:76 | Silverfish |
 | `LeavesBlock` | `leaves` (new) | MH:553 | Waterlogged leaves still count as solid |
 | `LilyPadBlock` | `lily_pad` | MH:224 | Water under a lily pad is not walk-through |
@@ -133,7 +143,7 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 |---|---|---|---|
 | `LiquidBlock.LEVEL` | `liquid_block && fluid_source` (level 0 ⇔ source) | MH:104,502,522 | Source liquid next to the block → avoid breaking it; frost walker needs source water |
 | `FrostedIceBlock.meltsInto()` identity | `liquid_block && fluid == Water && fluid_source` | MH:501,521 | Frost walker target = the default water state |
-| `getFluidState().isEmpty()` | `fluid != None` | MH:111,174,214,224,249,373,533,610,753; MovementParkour.java:98,101; MovementPillar.java:100; MovementTraverse.java:165; CalculationContext.java:197; PathExecutor.java:323 | "Has any fluid", waterlogged included |
+| `getFluidState().isEmpty()` | `fluid == Empty` | MH:111,174,214,224,249,373,533,610,753; MovementParkour.java:98,101; MovementPillar.java:100; MovementTraverse.java:165; CalculationContext.java:197; PathExecutor.java:323 | "Has any fluid", waterlogged included |
 | `getFluidState().getType() == Fluids.*` | `fluid` + `fluid_source` | MH:459 (`FLOWING_WATER`),720-721,737-738 | `isWater` / `isLava` (still or flowing); flowing water above |
 | `FluidType.getAmount(fs) != 8` | `fluid_amount` | MH:175,759,767 | Not full (8 means source or falling) → flowing |
 | `FluidState.isSource()` | `fluid_source` | CalculationContext.java:194,197 | `allowPlaceInFluidsSource` / `allowPlaceInFluidsFlow` |
@@ -145,7 +155,7 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `HorizontalDirectionalBlock.FACING` | `facing` (axis) | MH:356 | Door passability: facing axis vs. the player's approach axis |
 | `LadderBlock.FACING` | `facing` | MovementFall.java:171 | Fall steers away from the ladder's wall |
 | `NetherWartBlock.AGE`, `CocoaBlock.AGE`, `CropBlock::isMaxAge` | `properties.age` + per-`name` max age | FarmProcess.java:123,124,156 | Ripeness |
-| `FallingBlock.isFree(state)` | `air \|\| fire \|\| replaceable \|\| liquid_block` (vanilla definition; verify in phase 2) | MH:95 | Falling block below is unsupported |
+| `FallingBlock.isFree(state)` | `air \|\| fire \|\| liquid \|\| replaceable` (`movement_helper::falling_block_is_free`; vanilla: `isAir() \|\| is(BlockTags.FIRE) \|\| liquid() \|\| canBeReplaced()`) | MH:95 | Falling block below is unsupported. `liquid()` also covers bubble columns |
 | `isPathfindable(PathComputationType.LAND)` | `pathfindable_land` (new) | MH:184,230,258,286,293 | Fallback for walk-through and fully passable. 184/258 are inside the tri-states; 230/286/293 run at runtime |
 | `canBeReplaced()` | `replaceable` | MH:322; MovementPillar.java:212 | Can place into it; pillar decides whether it must break the block first |
 | `Block.isShapeFullBlock(getCollisionShape(null,null))` | `normal_cube` (new) | MH:787 (exclusions at 778-783) | `isBlockNormalCube`: a full collision cube with no world context. Position-dependent shapes throw, which counts as false |
@@ -167,44 +177,57 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `ctx.world().dimension() == Level.NETHER` (not block data) | world `water_evaporates` (new, world-level) | CalculationContext.java:104; MovementFall.java:105 | No water-bucket falls in the Nether |
 | `getEntitiesOfClass(FallingBlockEntity)` (not block data) | entity list | Movement.java:159 | Pause mining while falling blocks are in the air |
 
-## Proposed trait fields
+## Trait fields
 
-Unmarked fields are from the plan's trait table. "(new)" marks fields the plan does not list.
+`crate::host::BlockState`, table version 1. Serialized as JSON with these names; enum values are
+snake_case (`"nether_vine"`), `Option` fields are absent or `null` when unset, and every field except
+`name` and the three tri-states defaults to false / zero / empty. "(new)" marks fields the plan's
+trait table does not list.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `name`, `properties` | `String`, `Map<String,String>` | Block id and state properties. Used by BlockOptionalMeta, Farm/Mine/GetToBlock targets and the settings block lists |
+| `name`, `properties` | `String`, `BTreeMap<String,String>` | Block id and state properties. Used by BlockOptionalMeta, Farm/Mine/GetToBlock targets and the settings block lists |
 | `air` | `bool` | Java `AirBlock` (air, cave air, void air) |
 | `can_walk_on`, `can_walk_through`, `fully_passable` | `Ternary` | Precomputed tri-states. MAYBE → position check in Rust. Setting overrides are listed under Caveats |
-| `fluid` | `None\|Water\|Lava` | Fluid in this state, waterlogged and bubble column included |
+| `fluid` | `Empty\|Water\|Lava` | Fluid in this state, waterlogged and bubble column included |
 | `fluid_source` | `bool` | `FluidState.isSource()` (the plan's "flowing" is `!fluid_source`) |
 | `fluid_amount` | `u8` | `FluidState.getAmount()`: 8 for source or falling, 1-7 for flowing (the plan's "level") |
 | `liquid_block` (new) | `bool` | The block itself is a pure liquid (Java `LiquidBlock`: water/lava), not waterlogged |
-| `climbable` | `None\|Ladder\|Vine\|NetherVine\|Scaffolding` | `isClimbable` = Ladder\|Vine\|NetherVine. The `NetherVine` variant (weeping/twisting, both parts) is new |
+| `liquid` (new) | `bool` | `BlockBehaviour.liquid()`: `liquid_block` plus bubble columns. Only `FallingBlock.isFree` reads it |
+| `climbable` | `Option<Ladder\|Vine\|NetherVine\|Scaffolding>` | `isClimbable` = Ladder\|Vine\|NetherVine. The `NetherVine` variant (weeping/twisting, both parts) is new |
 | `falls` | `bool` | Java `FallingBlock` (gravity) |
-| `avoid_walking_into` | `bool` | Cactus, sweet berry bush, fire, end portal, cobweb, bubble column. Rust ORs in `fluid != None` and `hot_floor && !allowWalkOnMagmaBlocks` |
+| `avoid_walking_into` | `bool` | Cactus, sweet berry bush, fire, end portal, cobweb, bubble column. Rust ORs in `fluid != Empty` and `hot_floor && !allowWalkOnMagmaBlocks` |
 | `hot_floor` (new) | `bool` | Hurts entities that stand on it unless they sneak (magma) |
 | `fire` (new) | `bool` | Java `BaseFireBlock` (fire, soul fire) |
 | `avoid_breaking` | `bool` | Ice (turns into water), infested blocks |
-| `replaceable` | `bool` | `canBeReplaced()`; tall grass and large fern must be true |
+| `replaceable` | `bool` | `canBeReplaced()` |
 | `can_place_against` | `bool` | `normal_cube \|\| glass \|\| stained glass`. Rust adds the world-border check |
 | `normal_cube` (new) | `bool` | `isBlockNormalCube`: full collision cube with no world context, excluding bamboo, moving piston, scaffolding, shulker box, pointed dripstone and amethyst clusters |
 | `pathfindable_land` (new) | `bool` | `isPathfindable(LAND)` |
-| `slab` | `None\|Bottom\|Top\|Double` | Slab type |
-| `stairs` | `None\|{half: Bottom\|Top, inner_corner: bool}` | Stairs. `inner_corner` is new (`SHAPE` is `INNER_LEFT`/`INNER_RIGHT`) |
-| `openable` | `None\|Door\|FenceGate\|TrapDoor` | Door, gate or trapdoor |
-| `open`, `half`, `facing` | `bool`, `Bottom\|Top`, `Option<N\|S\|E\|W>` | Openable state. `facing` also carries `LadderBlock.FACING` (new use) |
-| `hand_openable` (new) | `bool` | Can be opened with a right-click (false for iron doors) |
+| `slab` | `Option<Top\|Bottom\|Double>` | Slab type |
+| `stairs` | `Option<{half: Top\|Bottom, inner_corner: bool}>` | Stairs. `inner_corner` is new (`SHAPE` is `INNER_LEFT`/`INNER_RIGHT`) |
+| `openable` | `Option<Door\|FenceGate\|TrapDoor>` | Door, gate or trapdoor |
+| `open`, `half` | `bool`, `Top\|Bottom` | Openable state. A door's lower half is `Bottom` |
+| `facing` | `Option<Direction>` | `HORIZONTAL_FACING` of every state that has it: doors (MH:356) and `LadderBlock.FACING` (new use) among others |
+| `hand_openable` (new) | `bool` | Can be opened with a right-click (false for iron doors and iron trapdoors) |
 | `snow_layers` | `u8` | 0 = not a snow layer, otherwise 1-8 |
 | `farmland` | `bool` | Farmland (dirt path only feeds `can_walk_on`) |
-| `speed_kind` | `None\|SoulSand\|Honey\|Cobweb` | Only `SoulSand` is read outside the tri-states |
+| `speed_kind` | `Option<SoulSand\|Honey\|Cobweb>` | Only `SoulSand` is read outside the tri-states |
 | `lily_pad` | `bool` | Lily pad |
 | `carpet` (new) | `bool` | Java `CarpetBlock` |
 | `leaves` (new) | `bool` | Java `LeavesBlock` |
 | `chest_like` | `bool` | Chest, trapped chest, ender chest |
-| `bubble_column`, `end_portal` | `bool` | In the plan, but upstream only reads them inside the tri-states and `avoid_walking_into`, so they can stay host-internal |
-| `hardness` | `f32` | `getDestroySpeed`; < 0 means unbreakable |
-| `harvest_tools`, `required_tier`, `requires_tool` | tool-class set, tier, `bool` | Refines the plan's "harvest tool class" into a set, because swords and shears have per-block speed rules |
-| `collision_shape`, `outline_shape` | `[AABB]` | Aim points, raytrace, position checks |
-| `drops` (new) | `[item name]` | Default-state loot with a netherite pickaxe (the BlockOptionalMeta stack match) |
-| `bonemealable` (new) | `bool` | Approximates `isValidBonemealTarget && isBonemealSuccess` |
+| `hardness` | `f32` | `getDestroySpeed(null, null)`; < 0 means unbreakable (also when it throws) |
+| `requires_tool` | `bool` | `requiresCorrectToolForDrops()` |
+| `collision_shape`, `outline_shape` | `Vec<Aabb>` | Aim points, raytrace, position checks. Computed at `BlockPos.ZERO` with no world, so position-offset shapes (flowers, bamboo) are at their zero offset |
+
+Not in version 1, added with the code that reads them:
+
+| Field | Type | Meaning | Phase |
+|---|---|---|---|
+| `harvest_tools`, `required_tier` | tool-class set, tier | Refines the plan's "harvest tool class" into a set, because swords and shears have per-block speed rules. Exporting them needs the item tool components, which read block tags | ToolSet |
+| `drops` (new) | `[item name]` | Default-state loot with a netherite pickaxe (the BlockOptionalMeta stack match). Needs loot tables | 5 |
+| `bonemealable` (new) | `bool` | Approximates `isValidBonemealTarget && isBonemealSuccess` | 5 |
+
+Not needed: `bubble_column` and `end_portal` from the plan. Upstream only reads them inside the tri-states
+and `avoid_walking_into`, so they stay host-internal.

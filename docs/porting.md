@@ -20,17 +20,33 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   - a descriptive name when the difference is semantic: `Goal::heuristic()` is
     `heuristic_at_goal()`, the 2-argument `calcRotationFromVec3d` is
     `calc_rotation_from_vec3d_absolute`
+  - for `MovementHelper`-style overloads that differ in how they reach the world, the
+    `CalculationContext` form is the plain name, `_bsi` is the `BlockStateInterface` form and
+    `_ctx` the `IPlayerContext` form; `_state` marks the form with an extra `BlockState`
+    argument (`can_walk_on(context, x, y, z)`, `can_walk_on_bsi(bsi, x, y, z)`,
+    `can_walk_on_bsi_state(bsi, x, y, z, state)`). A function with a single form keeps the
+    plain name whatever its arguments (`avoid_breaking(bsi, ...)`).
 - Constructors are `new`; other constructors are `from_pos`, `from_f64`, ... A constructor that
   takes a nullable `Integer` takes `Option<i32>` instead of being split in two.
 
 ## Minecraft types
 
 - `BlockPos` is `BetterBlockPos` everywhere.
-- `Mth`, `Vec3`, `Direction` live in `crate::mc`, ported from the 26.3 client jar's bytecode
-  and verified bit for bit. Only math/geometry goes there.
+- `Mth`, `Vec3`, `Direction`, `AABB` (`Aabb`) live in `crate::mc`, ported from the 26.3 client
+  jar's bytecode and verified bit for bit. Only math/geometry goes there.
 - Block and item classes are never ported. Every `Blocks.X`, `instanceof XxxBlock` and
   block-state query maps to a host trait; see `docs/trait-mapping.md`, and add a row there for
   any new check.
+- `BlockState` is `crate::host::BlockState`, the host's traits for one state, passed as
+  `&BlockState` (what `BlockStateInterface::get0` returns). `state.getBlock() == Blocks.X` and
+  `instanceof` become trait reads (`state.fluid`, `state.carpet`); comparing two states
+  (`state == other`) compares `id`. Upstream parameters of type `Block` take `&BlockState`.
+- `Block.BLOCK_STATE_REGISTRY` is `crate::host::BlockStateTable`; the state id is the index.
+- The client world (`ClientLevel`, `ClientChunkCache`, `LevelChunk`, `WorldBorder`,
+  `dimensionType()`) is `crate::host::World`, read through an `Arc<World>` snapshot. A
+  `BlockStateInterface` owns one snapshot, which replaces `createThreadSafeCopy`.
+- The chunk cache (`CachedRegion`, `WorldData`) is not ported. Where upstream falls back to it,
+  the port does what upstream does without world data (air, not loaded).
 - `Pair<A, B>` is a tuple, nullable values are `Option`.
 
 ## Java numeric semantics
@@ -71,13 +87,24 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 
 ## Verification
 
-`tools/refgen/run.sh` compiles the real upstream classes against the real 26.3 client jar
-(stubbing only `BaritoneAPI`, `Settings`, `SettingsUtil`, which would boot the whole client),
-runs `RefGen`, and writes `tests/fixtures/reference/math_goals.json`. `tests/reference_*.rs`
-replay the fixtures and compare floats bit for bit.
+`tools/refgen/run.sh` compiles the real upstream classes against the real 26.3 client jar. The
+classes under test are listed in `SOURCES`; javac compiles whatever else they reference from
+upstream's source tree (`-sourcepath`). Only `BaritoneAPI` is stubbed, because the real one reads
+the settings file and boots the Baritone provider; `Settings` is the real class. `RefGen`
+bootstraps the Minecraft registries and binds the block tags from the jar's data pack, so block
+checks behave as in game. It writes:
 
-To cover a newly ported pure class: add its upstream source to `SOURCES` in `run.sh`, add a
-section to `RefGen.java`, regenerate, and add a replay test. Upstream code that cannot be
-compiled standalone may be copied into `RefGen.java` verbatim (see the `RotationUtils` region).
-Regenerate after every upstream sync; the replay test fails if the fixture's commit differs from
-`UPSTREAM`.
+- `tests/fixtures/reference/math_goals.json`: math, positions, goals (`RefGen`).
+- `tests/fixtures/reference/blocks.json.gz`: the Java-semantics block state table, and the
+  results of MovementHelper's block checks, PrecomputedData and BetterWorldBorder for every
+  state and in random worlds, under two settings configurations (`BlockRefGen`). Upstream code
+  that needs a `BlockStateInterface` gets `BlockRefGen.FakeBsi`, a subclass over a map of
+  blocks created without running the client-bound constructor.
+
+`tests/reference_*.rs` replay the fixtures and compare floats bit for bit.
+
+To cover a newly ported class: add its upstream source to `SOURCES` in `run.sh`, add a section
+to `RefGen.java` or `BlockRefGen.java`, regenerate, and add a replay test. Upstream code that
+cannot run standalone may be copied into `RefGen.java` verbatim (see the `RotationUtils`
+region). Regenerate after every upstream sync; the replay tests fail if the fixture's commit
+differs from `UPSTREAM`.

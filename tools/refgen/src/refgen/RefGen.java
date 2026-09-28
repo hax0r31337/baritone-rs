@@ -22,8 +22,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.server.Bootstrap;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
@@ -61,6 +63,10 @@ public final class RefGen {
     private RefGen() {}
 
     public static void main(String[] args) throws Exception {
+        // the real Settings class (and the block checks) need the registries
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+
         JsonObject root = new JsonObject();
         root.addProperty("upstream", args[0]);
         root.addProperty("minecraft", args[1]);
@@ -74,6 +80,7 @@ public final class RefGen {
         root.add("goal_statics", goalStatics());
         Files.writeString(Path.of(args[2]), new Gson().toJson(root) + "\n");
         Files.writeString(Path.of(args[3]), mthTables(args[1]));
+        BlockRefGen.write(args[0], args[1], Path.of(args[4]));
     }
 
     /**

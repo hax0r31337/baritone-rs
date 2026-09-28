@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Regenerates tests/fixtures/reference/math_goals.json (and src/mc/mth_tables.rs) by running
-# the real upstream Baritone classes against the real Minecraft client jar.
+# Regenerates tests/fixtures/reference/math_goals.json, tests/fixtures/reference/blocks.json.gz
+# and src/mc/mth_tables.rs by running the real upstream Baritone classes against the real
+# Minecraft client jar (registries bootstrapped, block tags bound from its data pack).
 #
 # Usage: tools/refgen/run.sh [path/to/baritone]   (default: ../baritone)
 # Needs: java/javac 25+, curl, sha1sum. Downloads (~70 MB) are cached in target/refgen-cache.
@@ -13,6 +14,7 @@ MINECRAFT=26.3
 CACHE="$ROOT/target/refgen-cache"
 BUILD="$ROOT/target/refgen-build"
 OUT="$ROOT/tests/fixtures/reference/math_goals.json"
+BLOCKS_OUT="$ROOT/tests/fixtures/reference/blocks.json.gz"
 MTH_TABLES="$ROOT/src/mc/mth_tables.rs"
 
 head="$(git -C "$BARITONE" rev-parse HEAD)"
@@ -40,6 +42,11 @@ JARS=(
     "438e036486bad66b189bff385dd07dea4f74a146 https://libraries.minecraft.net/org/joml/joml/1.10.9/joml-1.10.9.jar"
     "7425a601c1c7ec76645a78d22b8c6a627edee507 https://libraries.minecraft.net/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar"
     "d9e58ac9c7779ba3bf8142aff6c830617a7fe60f https://libraries.minecraft.net/org/slf4j/slf4j-api/2.0.17/slf4j-api-2.0.17.jar"
+    # compile-only dependencies of upstream classes that javac pulls in through -sourcepath
+    "1d71ed0f8310e92117bd78ffa1a766e026b39d97 https://babbaj.github.io/maven/dev/babbaj/nether-pathfinder/1.6/nether-pathfinder-1.6.jar"
+    "25ea2e8b0c338a877313bd4672d3fe056ea78f0d https://repo1.maven.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar"
+    "3f2bd4ba11c4162733c13cc90ca7c7ea09967102 https://repo1.maven.org/maven2/commons-io/commons-io/2.7/commons-io-2.7.jar"
+    "7af6a669488450c4a07c2c3254e2151df42d7d04 https://repo1.maven.org/maven2/org/jetbrains/annotations/24.1.0/annotations-24.1.0.jar"
 )
 
 mkdir -p "$CACHE"
@@ -57,22 +64,29 @@ for entry in "${JARS[@]}"; do
 done
 CP="${CP#:}"
 
-# Real upstream sources under test. BaritoneAPI, Settings and SettingsUtil are stubbed
-# (tools/refgen/stubs) because the real ones bootstrap the whole client.
+# Real upstream sources under test, plus whatever they reference: javac compiles those from
+# -sourcepath on demand. Only BaritoneAPI is stubbed (tools/refgen/stubs), because the real one
+# reads the settings file and boots the Baritone provider; the stub hands out a real Settings.
 API="$BARITONE/src/api/java/baritone/api"
+MAIN="$BARITONE/src/main/java/baritone"
 SOURCES=(
     "$API"/pathing/goals/*.java
     "$API/pathing/movement/ActionCosts.java"
     "$API/utils/BetterBlockPos.java"
     "$API/utils/Rotation.java"
     "$API/utils/interfaces/IGoalRenderPos.java"
-    "$BARITONE/src/main/java/baritone/utils/BaritoneMath.java"
+    "$MAIN/utils/BaritoneMath.java"
+    "$MAIN/pathing/movement/MovementHelper.java"
+    "$MAIN/pathing/precompute/PrecomputedData.java"
+    "$MAIN/utils/BlockStateInterface.java"
+    "$MAIN/utils/pathing/BetterWorldBorder.java"
 )
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 javac -nowarn -encoding UTF-8 -d "$BUILD" -cp "$CP" \
+    -sourcepath "$BARITONE/src/main/java:$BARITONE/src/api/java:$BARITONE/src/schematica_api/java" \
     $(find "$ROOT/tools/refgen/stubs" "$ROOT/tools/refgen/src" -name '*.java') \
     "${SOURCES[@]}"
-java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES"
-echo "wrote $OUT and $MTH_TABLES"
+java -cp "$BUILD:$CP" refgen.RefGen "$COMMIT" "$MINECRAFT" "$OUT" "$MTH_TABLES" "$BLOCKS_OUT"
+echo "wrote $OUT, $BLOCKS_OUT and $MTH_TABLES"
