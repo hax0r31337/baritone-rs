@@ -1,9 +1,13 @@
 pub mod better_block_pos;
+pub mod block_optional_meta;
+pub mod block_optional_meta_lookup;
+pub mod block_utils;
 pub mod helper;
 pub mod i_player_context;
 pub mod i_player_controller;
 pub mod input;
 pub mod interfaces;
+pub mod my_chunk_pos;
 pub mod path_calculation_result;
 pub mod ray_trace_utils;
 pub mod rotation;
@@ -12,7 +16,10 @@ pub mod settings_util;
 pub mod vec_utils;
 
 pub use better_block_pos::BetterBlockPos;
+pub use block_optional_meta::BlockOptionalMeta;
+pub use block_optional_meta_lookup::BlockOptionalMetaLookup;
 pub use i_player_context::IPlayerContext;
 pub use i_player_controller::IPlayerController;
+pub use my_chunk_pos::MyChunkPos;
 pub use path_calculation_result::PathCalculationResult;
 pub use rotation::Rotation;

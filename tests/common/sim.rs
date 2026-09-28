@@ -8,12 +8,15 @@
 //! Minecraft: it only has to be the same on both sides, and good enough to walk, jump, fall,
 //! break and place.
 //!
-//! A tick: Baritone's tick (`on_tick`), then the player's tick (`on_player_update(Pre)`, input,
-//! jump, movement, the rotation sent to the server, `on_player_update(Post)`), all while
-//! holding `pathPlanLock`; then the harness waits for a running calculation to finish, and
-//! applies the blocks the game mode broke and placed during the tick. Holding the lock and
-//! deferring the world changes keep the calculation thread from racing the tick.
+//! A tick: Baritone's tick (`on_tick`), then the background work the processes started during
+//! it (rescans), then the player's tick (`on_player_update(Pre)`, input, jump, movement with
+//! stepping up, the rotation sent to the server, `on_player_update(Post)`), all while holding
+//! `pathPlanLock`; then the harness waits for a running calculation to finish, applies the
+//! blocks the game mode broke and placed during the tick, and loads the chunks around the
+//! player (if the scenario loads chunks). Holding the lock and deferring the world changes
+//! keep the calculation thread from racing the tick.
 
+use std::any::Any;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -27,7 +30,9 @@ use baritone::api::utils::i_player_controller::{
 };
 use baritone::api::utils::input::Input;
 use baritone::behavior::look::ForkableRandom;
-use baritone::host::{Climbable, Half, InteractionHand, ItemStack, Openable, Player, World};
+use baritone::host::{
+    Chunk, Climbable, Entity, Half, InteractionHand, ItemStack, Openable, Player, World,
+};
 use baritone::java::max_f64;
 use baritone::java::min_f64;
 use baritone::mc::{Aabb, BlockHitResult, Direction, Vec3, mth};
@@ -132,6 +137,48 @@ impl GameMode {
             }
             return InteractionResult::Success;
         }
+        // containers open, unless sneaking with something in hand
+        if CONTAINERS.contains(&clicked.name.as_str()) && !(player.crouching && !item.is_empty()) {
+            player.container_open = true;
+            return InteractionResult::Success;
+        }
+        // bone meal ages what has an age by 3, up to its maximum
+        if item.is_item("minecraft:bone_meal") {
+            let Some(now) = clicked
+                .properties
+                .get("age")
+                .map(|a| a.parse::<i32>().unwrap())
+            else {
+                return InteractionResult::Pass;
+            };
+            let max = TABLE
+                .get_possible_states(&clicked.name)
+                .map(|s| s.properties["age"].parse::<i32>().unwrap())
+                .max()
+                .unwrap();
+            if now >= max {
+                return InteractionResult::Pass;
+            }
+            let aged = with_property(clicked, "age", &(now + 3).min(max).to_string());
+            self.pending.push((hit.get_block_pos(), aged));
+            shrink(player, selected);
+            return InteractionResult::Success;
+        }
+        // seeds and the like plant their crop against the clicked face, even inside the player
+        if let Some(&(_, plant)) = PLANTS.iter().find(|(seed, _)| item.is_item(seed)) {
+            let target = if clicked.replaceable {
+                hit.get_block_pos()
+            } else {
+                hit.get_block_pos().relative(hit.get_direction())
+            };
+            if !world.get_block_state(target).replaceable {
+                return InteractionResult::Fail;
+            }
+            self.pending
+                .push((target, TABLE.get_default_state(plant).unwrap().id));
+            shrink(player, selected);
+            return InteractionResult::Success;
+        }
         let Some(block) = TABLE
             .get_default_state(item.get_item())
             .filter(|_| !item.is_empty())
@@ -152,25 +199,57 @@ impl GameMode {
             return InteractionResult::Fail;
         }
         self.pending.push((target, block));
-        let stack = &mut player.inventory.items[selected as usize];
-        stack.count -= 1;
-        if stack.count <= 0 {
-            *stack = ItemStack::empty();
-        }
+        shrink(player, selected);
         InteractionResult::Success
     }
 }
 
-/// The same block with its `open` property flipped.
-fn toggled(state: &baritone::host::BlockState) -> u32 {
+/// Blocks whose menu opens on a right click.
+const CONTAINERS: [&str; 6] = [
+    "minecraft:crafting_table",
+    "minecraft:furnace",
+    "minecraft:blast_furnace",
+    "minecraft:chest",
+    "minecraft:trapped_chest",
+    "minecraft:ender_chest",
+];
+
+/// Items that plant a block other than their own.
+const PLANTS: [(&str, &str); 8] = [
+    ("minecraft:wheat_seeds", "minecraft:wheat"),
+    ("minecraft:carrot", "minecraft:carrots"),
+    ("minecraft:potato", "minecraft:potatoes"),
+    ("minecraft:beetroot_seeds", "minecraft:beetroots"),
+    ("minecraft:nether_wart", "minecraft:nether_wart"),
+    ("minecraft:cocoa_beans", "minecraft:cocoa"),
+    ("minecraft:melon_seeds", "minecraft:melon_stem"),
+    ("minecraft:pumpkin_seeds", "minecraft:pumpkin_stem"),
+];
+
+/// Takes one item from the selected stack.
+fn shrink(player: &mut Player, selected: i32) {
+    let stack = &mut player.inventory.items[selected as usize];
+    stack.count -= 1;
+    if stack.count <= 0 {
+        *stack = ItemStack::empty();
+    }
+}
+
+/// The same block with `property` set to `value`.
+fn with_property(state: &baritone::host::BlockState, property: &str, value: &str) -> u32 {
     let mut properties = state.properties.clone();
-    let open = properties["open"] == "true";
-    properties.insert("open".to_owned(), (!open).to_string());
+    properties.insert(property.to_owned(), value.to_owned());
     TABLE
         .iter()
         .find(|s| s.name == state.name && s.properties == properties)
         .unwrap()
         .id
+}
+
+/// The same block with its `open` property flipped.
+fn toggled(state: &baritone::host::BlockState) -> u32 {
+    let open = state.properties["open"] == "true";
+    with_property(state, "open", &(!open).to_string())
 }
 
 /// Blocks the simulation climbs: ladders, vines, weeping and twisting vines, scaffolding.
@@ -437,6 +516,34 @@ fn collide(world: &World, bb: &Aabb, delta: Vec3) -> Vec3 {
     Vec3::new(out[0], out[1], out[2])
 }
 
+/// The player's step height (`Attributes.STEP_HEIGHT`).
+const STEP: f64 = 0.6;
+
+/// `Entity.collide` with stepping up: a move on the ground that runs into something at most
+/// [`STEP`] high goes up, across and back down instead, if that gets further.
+fn collide_and_step(world: &World, bb: &Aabb, delta: Vec3, on_ground: bool) -> Vec3 {
+    let movement = collide(world, bb, delta);
+    let horizontal = movement.x != delta.x || movement.z != delta.z;
+    let on_ground_after = on_ground || (movement.y != delta.y && delta.y < 0.0);
+    if on_ground_after && horizontal {
+        let up = collide(world, bb, Vec3::new(0.0, STEP, 0.0)).y;
+        let raised = bb.move_by(0.0, up, 0.0);
+        let across = collide(world, &raised, Vec3::new(delta.x, 0.0, delta.z));
+        let down = collide(
+            world,
+            &raised.move_by(across.x, 0.0, across.z),
+            Vec3::new(0.0, movement.y - up, 0.0),
+        );
+        let stepped = Vec3::new(across.x, up + down.y, across.z);
+        if stepped.x * stepped.x + stepped.z * stepped.z
+            > movement.x * movement.x + movement.z * movement.z
+        {
+            return stepped;
+        }
+    }
+    movement
+}
+
 /// `Entity.canFallAtLeast`: nothing below the box within `min_height`.
 fn can_fall_at_least(world: &World, bb: &Aabb, dx: f64, dz: f64, min_height: f64) -> bool {
     let area = Aabb::new(
@@ -532,6 +639,30 @@ fn input_vector(input: Vec3, speed: f32, y_rot: f32) -> Vec3 {
 
 // endregion
 
+/// The upstream class name of a process.
+pub fn process_class(process: &dyn Any) -> &'static str {
+    use baritone::process::*;
+    if process.is::<BackfillProcess>() {
+        "BackfillProcess"
+    } else if process.is::<CustomGoalProcess>() {
+        "CustomGoalProcess"
+    } else if process.is::<ExploreProcess>() {
+        "ExploreProcess"
+    } else if process.is::<FarmProcess>() {
+        "FarmProcess"
+    } else if process.is::<FollowProcess>() {
+        "FollowProcess"
+    } else if process.is::<GetToBlockProcess>() {
+        "GetToBlockProcess"
+    } else if process.is::<InventoryPauserProcess>() {
+        "InventoryPauserProcess"
+    } else if process.is::<MineProcess>() {
+        "MineProcess"
+    } else {
+        panic!("unknown process")
+    }
+}
+
 /// What happened in a tick, for comparing runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TickRecord {
@@ -551,6 +682,10 @@ pub struct TickRecord {
     pub path: Option<(i32, usize)>,
     /// The class of the current movement, if pathing and not past the end.
     pub movement: Option<&'static str>,
+    /// The most recent pathing command: its type and goal.
+    pub command: Option<String>,
+    /// The class of the process that had control this tick.
+    pub in_control: Option<&'static str>,
 }
 
 pub struct Sim {
@@ -563,6 +698,9 @@ pub struct Sim {
     /// The rotation last sent to the server.
     last_sent: Option<(f32, f32)>,
     pub ticks: u32,
+    /// Every chunk the world can load, and the radius around the player's chunk that loads
+    /// after every tick.
+    pub loading: Option<(World, i32)>,
 }
 
 impl Sim {
@@ -583,6 +721,30 @@ impl Sim {
             jump_delay: 0,
             last_sent: None,
             ticks: 0,
+            loading: None,
+        }
+    }
+
+    /// Loads the chunks of `source` within `radius` of the player's chunk after every tick.
+    pub fn load_chunks_around(&mut self, source: World, radius: i32) {
+        self.loading = Some((source, radius));
+    }
+
+    fn load_chunks(&mut self) {
+        let Some((source, radius)) = &self.loading else {
+            return;
+        };
+        let feet = self.player().block_position();
+        let (cx, cz) = (feet.x >> 4, feet.z >> 4);
+        let world = self.baritone.world_mut().unwrap();
+        for x in cx - radius..=cx + radius {
+            for z in cz - radius..=cz + radius {
+                if let Some(chunk) = source.get_chunk(x, z)
+                    && !world.has_chunk(x, z)
+                {
+                    world.load_chunk(x, z, Chunk::clone(chunk)).unwrap();
+                }
+            }
         }
     }
 
@@ -605,6 +767,8 @@ impl Sim {
         {
             let _plan = plan_lock.lock();
             self.baritone.on_tick();
+            // the background work processes started during the tick
+            self.baritone.get_executor().wait_until_idle();
             self.player_tick();
         }
         // let a calculation started this tick finish and take effect
@@ -626,6 +790,7 @@ impl Sim {
         for (pos, id) in pending {
             world.set_block(pos.x, pos.y, pos.z, id).unwrap();
         }
+        self.load_chunks();
         self.ticks += 1;
         self.record()
     }
@@ -734,7 +899,7 @@ impl Sim {
         if crouching && player.on_ground && delta.y <= 0.0 {
             delta = back_off_from_edge(&world, &bb, delta);
         }
-        let movement = collide(&world, &bb, delta);
+        let movement = collide_and_step(&world, &bb, delta, player.on_ground);
         let x_collision = movement.x != delta.x;
         let y_collision = movement.y != delta.y;
         let z_collision = movement.z != delta.z;
@@ -821,7 +986,28 @@ impl Sim {
                     let position = usize::try_from(current.get_position()).ok()?;
                     movements.get(position).map(|m| m.class_name())
                 }),
+            command: self
+                .baritone
+                .get_pathing_control_manager()
+                .most_recent_command()
+                .map(|c| {
+                    let goal = c
+                        .goal
+                        .as_ref()
+                        .map_or_else(|| "null".to_owned(), ToString::to_string);
+                    format!("{} {goal}", c.command_type.name())
+                }),
+            in_control: self
+                .baritone
+                .get_pathing_control_manager()
+                .most_recent_in_control()
+                .map(|index| process_class(self.baritone.process(index).as_any())),
         }
+    }
+
+    /// Replaces the other entities between ticks.
+    pub fn set_entities(&mut self, entities: Vec<Entity>) {
+        self.baritone.set_entities(entities);
     }
 
     /// Changes a block between ticks.

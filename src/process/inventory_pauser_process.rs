@@ -38,7 +38,7 @@ impl InventoryPauserProcess {
 }
 
 impl IBaritoneProcess for InventoryPauserProcess {
-    fn is_active(&self, baritone: &Baritone) -> bool {
+    fn is_active(&mut self, baritone: &mut Baritone) -> bool {
         baritone.player_context.is_in_world()
     }
 
@@ -71,7 +71,7 @@ impl IBaritoneProcess for InventoryPauserProcess {
         5.1 // slightly higher than backfill
     }
 
-    fn display_name0(&self) -> String {
+    fn display_name0(&mut self, _baritone: &mut Baritone) -> String {
         "inventory pauser".to_owned()
     }
 

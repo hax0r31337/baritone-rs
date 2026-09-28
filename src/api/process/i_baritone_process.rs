@@ -1,9 +1,11 @@
 // Ported from baritone src/api/java/baritone/api/process/IBaritoneProcess.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
 // Processes live in the `Baritone` and get it passed in (upstream: `BaritoneProcessHelper`'s
-// `baritone` and `ctx` fields). While a process runs `on_tick` or `on_lost_control`, it is
-// taken out of the `Baritone`, so it cannot reach itself through it. `isTemporary` has no
-// default: upstream's `BaritoneProcessHelper` supplies `false`, which is not ported as a class.
+// `baritone` and `ctx` fields). While a process runs one of its methods, it is taken out of
+// the `Baritone` (`Baritone::with_process`), so it cannot reach itself through it. Upstream's
+// `isActive` may change things (the follow process scans the world, the backfill process
+// clears the forced inputs), so it takes `&mut` like the rest. `isTemporary` has no default:
+// upstream's `BaritoneProcessHelper` supplies `false`, which is not ported as a class.
 
 use std::any::Any;
 
@@ -27,7 +29,7 @@ pub const DEFAULT_PRIORITY: f64 = -1.0;
 /// That's it actually
 pub trait IBaritoneProcess: Any + Send {
     /// Would this process like to be in control?
-    fn is_active(&self, baritone: &Baritone) -> bool;
+    fn is_active(&mut self, baritone: &mut Baritone) -> bool;
 
     /// Called when this process is in control of pathing; Returns what Baritone should do.
     ///
@@ -66,16 +68,16 @@ pub trait IBaritoneProcess: Any + Send {
     }
 
     /// Returns a user-friendly name for this process. Suitable for a HUD.
-    fn display_name(&self, baritone: &Baritone) -> String {
+    fn display_name(&mut self, baritone: &mut Baritone) -> String {
         if !self.is_active(baritone) {
             // i love it when impcat's scuffed HUD calls displayName for inactive processes for 1 tick too long
             // causing NPEs when the displayname relies on fields that become null when inactive
             return "INACTIVE".to_owned();
         }
-        self.display_name0()
+        self.display_name0(baritone)
     }
 
-    fn display_name0(&self) -> String;
+    fn display_name0(&mut self, baritone: &mut Baritone) -> String;
 
     /// For downcasting to the concrete process.
     fn as_any(&self) -> &dyn Any;

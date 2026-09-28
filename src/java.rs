@@ -1,13 +1,15 @@
-//! Java numeric semantics that Rust does not provide out of the box.
+//! Java semantics that Rust does not provide out of the box: numerics, monitors, the executor
+//! and `HashMap` iteration order.
 //!
 //! Rust's `f64::min`/`f64::max` drop NaN and leave the sign of zero unspecified, while Java's
 //! `Math.min`/`Math.max` propagate NaN and order `-0.0` below `0.0`. Heuristics and costs are
 //! compared bit-exactly against upstream, so ported code uses these helpers wherever Java calls
 //! `Math.min`/`Math.max` on floating point values.
 
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::{Condvar, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::{self, ThreadId};
 use std::time::Instant;
 
@@ -218,6 +220,232 @@ pub fn current_time_millis() -> i64 {
     ORIGIN.elapsed().as_millis() as i64
 }
 
+/// `java.lang.IllegalArgumentException`, where upstream rejects input that comes from the
+/// user (block selectors, block names): the port returns it as an error, with upstream's
+/// message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IllegalArgumentException(pub String);
+
+impl fmt::Display for IllegalArgumentException {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for IllegalArgumentException {}
+
+/// `String.split(String)` with a one-character delimiter that is not a regex metacharacter:
+/// the pieces between the delimiters without the trailing empty ones. A string without the
+/// delimiter is one piece, even an empty one.
+pub fn split(s: &str, delimiter: char) -> Vec<&str> {
+    let mut parts: Vec<&str> = s.split(delimiter).collect();
+    if parts.len() == 1 {
+        return parts;
+    }
+    while parts.last() == Some(&"") {
+        parts.pop();
+    }
+    parts
+}
+
+/// The `java.util.concurrent.Executor` background work runs on (upstream:
+/// `Baritone.getExecutor()`, a thread pool that starts a thread whenever none is idle). Every
+/// task runs on a thread of its own. Clones share the count of running tasks.
+#[derive(Clone, Debug, Default)]
+pub struct Executor {
+    running: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl Executor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `execute(Runnable)`. A task that panics ends its thread, like an exception thrown in a
+    /// pool thread.
+    pub fn execute(&self, task: impl FnOnce() + Send + 'static) {
+        /// Counts the task as finished when its thread ends, however it ends.
+        struct Running(Arc<(Mutex<usize>, Condvar)>);
+
+        impl Drop for Running {
+            fn drop(&mut self) {
+                let (count, finished) = &*self.0;
+                *count.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                finished.notify_all();
+            }
+        }
+
+        *self
+            .running
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) += 1;
+        let running = Running(Arc::clone(&self.running));
+        // if the thread cannot start, the task and `running` are dropped here
+        let _ = thread::Builder::new()
+            .name("Baritone Executor".to_owned())
+            .spawn(move || {
+                let _running = running;
+                task();
+            });
+    }
+
+    /// Blocks until no task is running: for hosts and tests that need a tick's background
+    /// work done before going on.
+    pub fn wait_until_idle(&self) {
+        let (count, finished) = &*self.running;
+        let mut count = count.lock().unwrap_or_else(PoisonError::into_inner);
+        while *count > 0 {
+            count = finished.wait(count).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// A `java.util.HashMap`, where upstream iterates one: iteration follows Java's order, which
+/// is the order of the table's buckets and, within a bucket, insertion order. The bucket
+/// depends on the key's `hashCode()` (the `hash` function the map is made with) and on the
+/// table's capacity, which grows like Java's and never shrinks. Buckets that Java turns into
+/// trees (8 entries in one bucket of a table of 64 or more) keep insertion order here, which
+/// Java's does not always. Lookups are linear: the maps this is used for stay small.
+#[derive(Clone)]
+pub struct JavaHashMap<K, V> {
+    hash: fn(&K) -> i32,
+    /// In insertion order.
+    entries: Vec<(K, V)>,
+    /// The table's length, 0 before it is allocated.
+    capacity: usize,
+    /// The size above which the table grows; the initial capacity while there is no table.
+    threshold: usize,
+}
+
+impl<K: PartialEq + fmt::Debug, V: fmt::Debug> fmt::Debug for JavaHashMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K: PartialEq, V> JavaHashMap<K, V> {
+    const DEFAULT_INITIAL_CAPACITY: usize = 16;
+    const LOAD_FACTOR: f32 = 0.75;
+
+    /// `new HashMap<>()`, for keys whose `hashCode()` is `hash`.
+    pub fn new(hash: fn(&K) -> i32) -> Self {
+        Self {
+            hash,
+            entries: Vec::new(),
+            capacity: 0,
+            threshold: 0,
+        }
+    }
+
+    /// `new HashMap<>(other)`: sized for `other`, filled in `other`'s order.
+    pub fn copy_of(other: &Self) -> Self
+    where
+        K: Clone,
+        V: Clone,
+    {
+        let mut map = Self::new(other.hash);
+        let s = other.len();
+        if s > 0 {
+            // pre-size
+            let t = (s as f64 / Self::LOAD_FACTOR as f64).ceil() as usize;
+            if t > map.threshold {
+                map.threshold = t.next_power_of_two();
+            }
+            for (k, v) in other.iter() {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// `put(K, V)`: a new key goes last in its bucket, an existing key keeps its place.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if self.capacity == 0 {
+            self.resize();
+        }
+        if let Some((_, v)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
+            return Some(std::mem::replace(v, value));
+        }
+        self.entries.push((key, value));
+        if self.entries.len() > self.threshold {
+            self.resize();
+        }
+        None
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        Some(self.entries.remove(index).1)
+    }
+
+    /// `clear()`: the table keeps its capacity.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// The entries in Java's iteration order.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        let mut order: Vec<usize> = (0..self.entries.len()).collect();
+        let mask = self.capacity.wrapping_sub(1);
+        // stable: insertion order within a bucket
+        order.sort_by_key(|&i| {
+            let h = (self.hash)(&self.entries[i].0) as u32;
+            (h ^ (h >> 16)) as usize & mask
+        });
+        order.into_iter().map(|i| {
+            let (k, v) = &self.entries[i];
+            (k, v)
+        })
+    }
+
+    /// `keySet()`, in Java's iteration order.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(k, _)| k)
+    }
+
+    fn resize(&mut self) {
+        let old_cap = self.capacity;
+        let old_thr = self.threshold;
+        let mut new_thr = 0;
+        let new_cap;
+        if old_cap > 0 {
+            new_cap = old_cap << 1;
+            if old_cap >= Self::DEFAULT_INITIAL_CAPACITY {
+                new_thr = old_thr << 1; // double threshold
+            }
+        } else if old_thr > 0 {
+            // initial capacity was placed in threshold
+            new_cap = old_thr;
+        } else {
+            // zero initial threshold signifies using defaults
+            new_cap = Self::DEFAULT_INITIAL_CAPACITY;
+            new_thr = (Self::DEFAULT_INITIAL_CAPACITY as f32 * Self::LOAD_FACTOR) as usize;
+        }
+        if new_thr == 0 {
+            new_thr = (new_cap as f32 * Self::LOAD_FACTOR) as usize;
+        }
+        self.capacity = new_cap;
+        self.threshold = new_thr;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +524,91 @@ mod tests {
         // the compensation recovers what a plain sum loses
         assert_eq!(average([1e16, 1.0, 1.0, -1e16]), Some(0.5));
         assert_eq!(average([f64::INFINITY, f64::INFINITY]), Some(f64::INFINITY));
+    }
+
+    /// Orders printed by a JVM (OpenJDK 25) for the same operations on `HashMap<BlockPos, _>`.
+    #[test]
+    fn java_hash_map_order() {
+        use crate::api::utils::BetterBlockPos;
+
+        fn parse(s: &str) -> Vec<BetterBlockPos> {
+            s.split(' ')
+                .map(|p| {
+                    let c: Vec<i32> = p.split(',').map(|c| c.parse().unwrap()).collect();
+                    BetterBlockPos::new(c[0], c[1], c[2])
+                })
+                .collect()
+        }
+        fn keys(m: &JavaHashMap<BetterBlockPos, i32>) -> Vec<BetterBlockPos> {
+            m.keys().copied().collect()
+        }
+        let hash: fn(&BetterBlockPos) -> i32 = BetterBlockPos::block_pos_hash_code;
+
+        let added = parse(
+            "-10,3,-12 -16,0,-15 5,8,19 -7,2,2 16,2,16 12,6,-10 3,9,-20 3,6,13 -17,1,10 \
+             -2,7,-14 -10,6,10 -15,7,-13 -8,3,13 -16,9,5 3,7,-5 -6,7,-5 17,3,13 -20,8,16 \
+             -20,0,13 -1,1,-17 -3,9,12 -19,4,14 18,9,-5 -1,0,1 -7,9,-7 -7,6,0 5,3,-20 14,3,2 \
+             -13,3,9 4,8,19 7,6,-17 -5,9,3 9,6,16 -12,0,0 -8,9,3 11,9,-14 15,2,-14 4,7,-9 \
+             11,0,-14 15,6,19",
+        );
+        let mut m = JavaHashMap::new(hash);
+        for (i, &p) in added.iter().enumerate() {
+            m.insert(p, i as i32);
+        }
+        for i in (0..40).step_by(3) {
+            m.remove(&added[i]);
+        }
+        m.insert(added[0], 99);
+        let expected = parse(
+            "-1,0,1 -15,7,-13 11,0,-14 12,6,-10 3,6,13 -16,9,5 4,8,19 5,8,19 -8,9,3 9,6,16 \
+             -5,9,3 -17,1,10 -13,3,9 18,9,-5 -16,0,-15 16,2,16 -3,9,12 3,7,-5 11,9,-14 \
+             4,7,-9 5,3,-20 -1,1,-17 -7,6,0 -20,8,16 -10,3,-12 -10,6,10 17,3,13",
+        );
+        assert_eq!(keys(&m), expected);
+        assert_eq!(keys(&JavaHashMap::copy_of(&m)), expected);
+        assert_eq!(m.get(&added[0]), Some(&99));
+
+        let mut small = JavaHashMap::new(hash);
+        small.insert(BetterBlockPos::new(1, 2, 3), 0);
+        small.insert(BetterBlockPos::new(-5, 70, 2), 1);
+        let mut copy = JavaHashMap::copy_of(&small);
+        copy.insert(BetterBlockPos::new(0, 0, 0), 2);
+        copy.insert(BetterBlockPos::new(17, 0, 0), 3);
+        copy.insert(BetterBlockPos::new(1, 0, 0), 4);
+        assert_eq!(keys(&copy), parse("0,0,0 17,0,0 1,0,0 1,2,3 -5,70,2"));
+
+        let mut empty = JavaHashMap::copy_of(&JavaHashMap::new(hash));
+        empty.insert(BetterBlockPos::new(16, 0, 0), 0);
+        empty.insert(BetterBlockPos::new(0, 0, 0), 1);
+        assert_eq!(keys(&empty), parse("16,0,0 0,0,0"));
+    }
+
+    #[test]
+    fn java_split() {
+        assert_eq!(split("a,b", ','), ["a", "b"]);
+        assert_eq!(split("a,,b,,", ','), ["a", "", "b"]);
+        assert_eq!(split(",a", ','), ["", "a"]);
+        assert_eq!(split("", ','), [""]);
+        assert_eq!(split(",,", ','), [""; 0]);
+        assert_eq!(split("a", ','), ["a"]);
+    }
+
+    #[test]
+    fn executor_waits_for_its_tasks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let executor = Executor::new();
+        let done = Arc::new(AtomicUsize::new(0));
+        for _ in 0..4 {
+            let done = Arc::clone(&done);
+            executor.execute(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                done.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        executor.execute(|| panic!("a task that fails"));
+        executor.wait_until_idle();
+        assert_eq!(done.load(Ordering::SeqCst), 4);
     }
 
     #[test]

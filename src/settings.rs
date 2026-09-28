@@ -352,6 +352,9 @@ pub struct Settings {
     #[serde(rename = "slowPathTimeoutMS")]
     pub slow_path_timeout_ms: i64,
 
+    /// Fill in blocks behind you
+    pub backfill: bool,
+
     /// Print all the debug messages to chat
     pub chat_debug: bool,
 
@@ -674,6 +677,7 @@ impl Default for Settings {
             slow_path: false,
             slow_path_time_delay_ms: 100,
             slow_path_timeout_ms: 40000,
+            backfill: false,
             chat_debug: false,
             free_look: true,
             block_free_look: false,
@@ -798,6 +802,7 @@ mod tests {
         "avoidBreakingMultiplier",
         "avoidUpdatingFallingBlocks",
         "axisHeight",
+        "backfill",
         "backtrackCostFavoringCoefficient",
         "blacklistClosestOnFailure",
         "blockBreakAdditionalPenalty",

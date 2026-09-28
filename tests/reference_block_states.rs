@@ -33,6 +33,17 @@ struct Fixture {
     configs: BTreeMap<String, Settings>,
     state_refs: BTreeMap<String, Vec<String>>,
     worlds: Vec<FixtureWorld>,
+    block_optional_meta: Vec<BomSample>,
+}
+
+/// `new BlockOptionalMeta(selector)`: its `toString()` and matching state ids, or the
+/// exception (`Class: message`).
+#[derive(Deserialize)]
+struct BomSample {
+    selector: String,
+    string: Option<String>,
+    states: Option<Vec<u32>>,
+    error: Option<String>,
 }
 
 /// A state with an offset at a position: `getOffset(pos)` and the moved shapes (`toAabbs()`),
@@ -201,6 +212,57 @@ fn java_table() {
     );
     for (i, state) in table.iter().enumerate() {
         assert_eq!(state.id as usize, i);
+    }
+    // upstream's loot roll fails in 26.3, so no block drops anything (BlockRefGen.drops)
+    assert!(table.iter().all(|s| s.drops.is_empty()));
+    assert!(
+        table
+            .get_default_state("minecraft:wheat")
+            .is_some_and(|s| s.bonemealable)
+    );
+}
+
+/// Block selectors: what matches, what prints, and what is rejected. Upstream's messages for
+/// bad property names, values and repeats come from Minecraft's and Guava's classes; the port
+/// has its own, so only the rejection is compared there.
+#[test]
+fn block_optional_meta_matches_upstream() {
+    use baritone::api::utils::BlockOptionalMeta;
+
+    for sample in &FIXTURE.block_optional_meta {
+        let got = BlockOptionalMeta::from_selector(&TABLE, &sample.selector);
+        match (&got, &sample.error) {
+            (Ok(bom), None) => {
+                assert_eq!(
+                    Some(bom.to_string()),
+                    sample.string,
+                    "{:?}",
+                    sample.selector
+                );
+                let states: Vec<u32> = bom.get_all_block_states(&TABLE).map(|s| s.id).collect();
+                assert_eq!(Some(states), sample.states, "{:?}", sample.selector);
+            }
+            (Err(e), Some(error)) => {
+                let exact = ["invalid block selector", "Invalid block name"]
+                    .iter()
+                    .any(|m| e.0.starts_with(m))
+                    || e.0.ends_with("is not a valid property-value pair");
+                if exact {
+                    assert_eq!(
+                        format!("IllegalArgumentException: {}", e.0),
+                        *error,
+                        "{:?}",
+                        sample.selector
+                    );
+                }
+            }
+            _ => panic!(
+                "{:?}: port {:?}, upstream {:?}",
+                sample.selector,
+                got.map(|b| b.to_string()),
+                sample.error
+            ),
+        }
     }
 }
 

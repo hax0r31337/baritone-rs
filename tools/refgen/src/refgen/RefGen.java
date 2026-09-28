@@ -63,9 +63,14 @@ public final class RefGen {
 
     private RefGen() {}
 
+    /**
+     * The standard error stream from before {@code Bootstrap} redirected it.
+     */
+    static PrintStream err;
+
     public static void main(String[] args) throws Exception {
         // Bootstrap redirects System.out/err into log4j, which has no provider here
-        PrintStream err = System.err;
+        err = System.err;
         try {
             run(args);
         } catch (Throwable t) {

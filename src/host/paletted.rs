@@ -153,6 +153,18 @@ impl PalettedStorage {
         &self.palette
     }
 
+    /// Every entry is the palette's only id, with no packed entries (Java's
+    /// `SingleValuePalette`). Setting another id packs the storage for good.
+    pub fn is_single_value(&self) -> bool {
+        self.bits == 0
+    }
+
+    /// The index into [`Self::palette`] of the entry at `index`.
+    #[inline]
+    pub fn palette_index(&self, index: usize) -> u32 {
+        self.read(index)
+    }
+
     #[inline]
     fn read(&self, index: usize) -> u32 {
         if self.bits == 0 {

@@ -138,8 +138,33 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   which only outside listeners receive, are queued for the host (`take_path_events`).
 - Processes (`IBaritoneProcess`) are trait objects in `Baritone::processes`, in registration
   order (upstream's `HashSet` order is unspecified). The pathing control manager refers to them
-  by index; a process runs `on_tick` / `on_lost_control` taken out of the `Baritone`
-  (`Baritone::with_process`). Typed access downcasts (`get_custom_goal_process_mut`).
+  by index; a process runs any of its trait methods taken out of the `Baritone`
+  (`Baritone::with_process`), which is why `is_active` takes `&mut` like the rest (upstream's
+  `isActive` can change things). Typed access downcasts (`get_custom_goal_process_mut`). A
+  process method that reaches the `Baritone` (`MineProcess.mine`, `GetToBlockProcess.getToBlock`,
+  `FarmProcess.farm`, the `cancel`s) is an associated function taking it, which finds the
+  process with `Baritone::with_process_of`. The interfaces' default methods (`IMineProcess`,
+  `IFarmProcess`, ...) are folded into the process.
+- `Baritone.getExecutor()` is `Baritone::get_executor()`, a `crate::java::Executor` per
+  `Baritone` (a thread per task) that the host or a test can wait for (`wait_until_idle`).
+  The fields a process's background task reads and writes live in an `Arc<Mutex<_>>` shared
+  with it; the process holds the mutex for its whole `on_tick`, so a task started during the
+  tick reads and writes after it, one of the orders upstream's race allows. A task gets
+  snapshots of what it reads from the player context (world, player, entities) taken when it
+  starts; the tick does not change them. `synchronized` process methods lock that mutex too.
+- A `java.util.HashMap` that upstream iterates is `crate::java::JavaHashMap`, which iterates in
+  Java's order (`MineProcess.anticipatedDrops`, `BackfillProcess.blocksToReplace`, keyed by
+  `BlockPos`, whose `hashCode` is `BetterBlockPos::block_pos_hash_code`). Other iteration orders
+  upstream leaves unspecified (`Stream.distinct`, `HashSet`) keep the first occurrence.
+- Anonymous goal subclasses are named structs in the process's file that wrap the goal they
+  extend (`BranchPointRunaway`, `MaintainYGoalXZ`); their `equals` is the class check upstream's
+  inherited `equals` does. `IChunkFilter`s are a trait with borrowed views of the cached world.
+- `BlockOptionalMeta` and `BlockOptionalMetaLookup` are resolved against the block state table:
+  a block is its name, a state matches by name and the selected properties, a stack matches
+  when its item is among the block's `drops`. Bad selectors are `Err(IllegalArgumentException)`.
+- There is no chunk cache. `crate::cache::CachedWorld` only knows which chunks were loaded while
+  Baritone ran (for the explore process), and every block counts as untracked, so searches scan
+  the loaded chunks with `FasterWorldScanner`.
 - `Movement.updateState(state)` changes the state in place (`update_state(baritone, &mut
   state)`); a subclass's `super.updateState` / `super.prepared` is `update_state_default` /
   `prepared_default`. `instanceof MovementX` on movements is a match on `MovementKind`.
@@ -172,7 +197,10 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   results of MovementHelper's block checks, PrecomputedData and BetterWorldBorder for every
   state and in random worlds, under two settings configurations (`BlockRefGen`). Upstream code
   that needs a `BlockStateInterface` gets `BlockRefGen.FakeBsi`, a subclass over a map of
-  blocks created without running the client-bound constructor.
+  blocks created without running the client-bound constructor. The table's `drops` come from
+  `BlockOptionalMeta.drops`' code with reflection in place of its mixin accessor; like
+  upstream's, every roll fails in 26.3, so they are all empty (the generator says so). The
+  fixture also holds the real `BlockOptionalMeta(String)` on assorted selectors.
 - `tests/fixtures/reference/paths.json.gz`: path calculations by the real `AStarPathFinder` in
   generated worlds (terrain in an Overworld and a low Nether shape, block noise, flat) under
   four hand-made settings configurations plus random mixes, and six inventories (one
@@ -193,21 +221,38 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   depend on speed; `a_star_path_finder.rs` unit tests cover timeouts and cancellation.
 - `tests/fixtures/reference/exec.json.gz`: execution, tick by tick (`ExecRefGen`). The real
   upstream `Baritone` (allocated without its constructor and wired with the real behaviors,
-  `PathingControlManager`, `CustomGoalProcess` and `InventoryPauserProcess`) runs against
-  stand-in client objects (`Minecraft`, `ClientLevel` with its chunk cache, `LocalPlayer`,
-  `MultiPlayerGameMode`, `Options`) and a simulated client: simplified movement (input,
-  jumping, friction, gravity, collision with block shapes, sneaking at edges, climbing) and a
-  simplified game mode (break progress from `ToolSet`, placing throwaways, opening doors,
-  inventory swaps). `tests/common/sim.rs` is the same simulation around the port; the two are
-  kept in sync operation for operation. A tick holds `pathPlanLock`, then waits for a running
-  calculation, then applies the blocks broken and placed, so nothing races. Scenarios cover
+  `PathingControlManager` and every process the port has, in upstream's registration order)
+  runs against stand-in client objects (`Minecraft`, `ClientLevel` with its chunk cache and
+  entities, `LocalPlayer`, `MultiPlayerGameMode`, `Options`, a world provider whose cached
+  world marks the loaded chunks every tick) and a simulated client: simplified movement (input,
+  jumping, friction, gravity, collision with block shapes, stepping up 0.6, sneaking at edges,
+  climbing) and a simplified game mode (break progress from `ToolSet`, placing throwaways,
+  planting seeds, bone meal, opening doors and containers, inventory swaps).
+  `tests/common/sim.rs` is the same simulation around the port; the two are kept in sync
+  operation for operation. A tick holds `pathPlanLock`, then waits for a running calculation,
+  then applies the blocks broken and placed, so nothing races. The processes' background work
+  (`Baritone.getExecutor()`, a static pool that `ExecRefGen.GatedExecutor` replaces) runs right
+  after the processes tick, before the player moves, on both sides (the port's sim waits for
+  `Executor::wait_until_idle`). Upstream's world scanner reads sections through mixin accessors,
+  so `ExecRefGen.RefWorldScanner` is a copy that reads the stand-in sections. Scenarios cover
   every movement, breaking, bridging, pillaring, ladders, doors and gates, segments planned
   ahead with and without splicing, world changes and teleports mid-path, failed calculations,
-  the loaded-chunk edge, inventory swaps and pauses, and random terrain. Every tick's player
-  state (bit for bit), forced inputs, game mode calls, path events and path position are
-  recorded. The fixture also holds raytraces (`Level.clip`), block centers and
-  `RotationUtils.reachable` / `playerFeet` / `pathStart` samples in a world of assorted shapes.
-  `tests/execution.rs` runs the port alone through scenarios and checks that it arrives.
+  the loaded-chunk edge, inventory swaps and pauses, random terrain, and every process: mining
+  (the shaft below a block, exposed ores only, legit mining, blacklisting unreachable blocks,
+  running away when nothing is known), getting to blocks (opening a crafting table, none
+  known), following and picking up item entities, exploring while chunks load around the
+  player, farming (harvesting, planting, bone meal, cocoa, sugar cane, items to pick up) and
+  backfilling. Process scenarios do not plan ahead (a process that changes its goal cancels the
+  next segment's calculation, which then ends cancelled or failed depending on thread timing)
+  and do not scan for dropped items (upstream matches item stacks through a mixin). Every
+  tick's player state (bit for bit), forced inputs, game mode calls, path events, path
+  position, pathing command (type and goal) and process in control are recorded. The fixture
+  also holds raytraces (`Level.clip`), block centers and `RotationUtils.reachable` /
+  `playerFeet` / `pathStart` samples in a world of assorted shapes. `REPLAY_TRACE=<scenario>`
+  prints a scenario's ticks on both sides. `tests/execution.rs` runs the port alone through
+  scenarios and checks that it arrives; `tests/processes.rs` covers what the fixture cannot:
+  mining quantities and dropped items (with a table whose logs drop logs), a chest upstream
+  would find in its cache, and settings the processes change.
 
 `tests/reference_*.rs` replay the fixtures and compare floats bit for bit.
 

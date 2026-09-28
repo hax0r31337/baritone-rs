@@ -123,6 +123,17 @@ SOURCES=(
     "$MAIN/utils/PathingControlManager.java"
     "$MAIN/utils/PlayerMovementInput.java"
     "$MAIN/utils/player/BaritonePlayerContext.java"
+    # processes (ExecRefGen)
+    "$API/utils/BlockOptionalMeta.java"
+    "$API/utils/BlockOptionalMetaLookup.java"
+    "$API/utils/BlockUtils.java"
+    "$MAIN/cache/FasterWorldScanner.java"
+    "$MAIN/process/BackfillProcess.java"
+    "$MAIN/process/ExploreProcess.java"
+    "$MAIN/process/FarmProcess.java"
+    "$MAIN/process/FollowProcess.java"
+    "$MAIN/process/GetToBlockProcess.java"
+    "$MAIN/process/MineProcess.java"
 )
 
 rm -rf "$BUILD"

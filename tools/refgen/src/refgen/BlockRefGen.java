@@ -2,6 +2,7 @@ package refgen;
 
 import baritone.api.BaritoneAPI;
 import baritone.api.Settings;
+import baritone.api.utils.BlockOptionalMeta;
 import baritone.pathing.movement.MovementHelper;
 import baritone.pathing.precompute.PrecomputedData;
 import baritone.pathing.precompute.Ternary;
@@ -22,17 +23,29 @@ import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.Tool;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.BaseFireBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.BonemealSource;
+import net.minecraft.world.level.block.BonemealableBlock;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.storage.loot.LootContext;
+import net.minecraft.world.level.storage.loot.LootParams;
+import net.minecraft.world.level.storage.loot.LootTable;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
 import net.minecraft.world.level.block.CarpetBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FallingBlock;
@@ -84,6 +97,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Function;
@@ -144,6 +158,14 @@ final class BlockRefGen {
         root.addProperty("upstream", upstream);
         root.addProperty("minecraft", minecraft);
         root.add("table", table(states));
+        if (dropsFailures > 0) {
+            RefGen.err.println("note: BlockOptionalMeta.drops fails for " + dropsFailures
+                    + " blocks, as upstream's does, so they drop nothing: " + firstDropsFailure);
+        }
+        if (!BONEMEAL_UNKNOWN.isEmpty()) {
+            RefGen.err.println("note: bone meal checks need a real world for " + BONEMEAL_UNKNOWN
+                    + "; exported as not bonemealable");
+        }
         root.add("offsets", offsets(states));
         root.add("configs", configs);
         JsonObject stateRefs = new JsonObject();
@@ -158,11 +180,45 @@ final class BlockRefGen {
         root.add("state_refs", stateRefs);
         root.add("worlds", worlds(states, configs));
         apply(new JsonObject());
+        root.add("block_optional_meta", blockOptionalMeta());
 
         try (Writer w = new OutputStreamWriter(new GZIPOutputStream(Files.newOutputStream(out)), StandardCharsets.UTF_8)) {
             w.write(new Gson().toJson(root));
             w.write('\n');
         }
+    }
+
+    /**
+     * The real {@code BlockOptionalMeta(String)} on assorted selectors: what it prints and
+     * which states it matches, or the exception it throws. Its item drops are always empty here
+     * (see {@link #drops}), so its item matching is not sampled.
+     */
+    private static JsonArray blockOptionalMeta() {
+        String[] selectors = {
+                "stone", "minecraft:stone", ":stone", "stone[]", "STONE", "stone\n", "stone\r\n", "st\none",
+                "furnace[lit=true]", "furnace[lit=true,facing=north]", "furnace[lit=true,]",
+                "furnace[,lit=true]", "furnace[lit]", "furnace[lit=]", "furnace[=true]", "furnace[lit=maybe]",
+                "furnace[color=red]", "furnace[lit=true,lit=false]", "furnace[lit=true=false]",
+                "oak_stairs[half=top,shape=inner_left]", "wheat[age=7]", "wheat[age=+7]", "wheat[age=07]",
+                "wheat[age=8]", "wheat[age=-1]", "redstone_wire[power=15,east=side]", "water[level=0]",
+                "not_a_block", "", "[", "a[b", "stone[lit=true]", "chest[type=single]", "minecraft:oak_log[axis=y]",
+        };
+        JsonArray out = new JsonArray();
+        for (String selector : selectors) {
+            JsonObject o = new JsonObject();
+            o.addProperty("selector", selector);
+            try {
+                BlockOptionalMeta bom = new BlockOptionalMeta(selector);
+                o.addProperty("string", bom.toString());
+                JsonArray ids = new JsonArray();
+                bom.getAllBlockStates().stream().map(Block.BLOCK_STATE_REGISTRY::getId).sorted().forEach(ids::add);
+                o.add("states", ids);
+            } catch (Exception e) {
+                o.addProperty("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+            out.add(o);
+        }
+        return out;
     }
 
     // region tags
@@ -327,7 +383,7 @@ final class BlockRefGen {
      * The trait table, computed with the settings the host assumes: upstream defaults, except
      * that {@code blocksToAvoid} is empty (Rust applies it).
      */
-    private static JsonObject table(List<BlockState> states) throws ReflectiveOperationException {
+    private static JsonObject table(List<BlockState> states) throws Exception {
         JsonObject base = new JsonObject();
         base.add("blocksToAvoid", new JsonArray());
         apply(base);
@@ -349,7 +405,7 @@ final class BlockRefGen {
             out.add(t);
         }
         JsonObject table = new JsonObject();
-        table.addProperty("version", 3);
+        table.addProperty("version", 4);
         table.addProperty("air", Block.BLOCK_STATE_REGISTRY.getId(Blocks.AIR.defaultBlockState()));
         table.add("states", out);
         return table;
@@ -374,7 +430,7 @@ final class BlockRefGen {
         return sorted;
     }
 
-    private static JsonObject traits(BlockState state) throws ReflectiveOperationException {
+    private static JsonObject traits(BlockState state) throws Exception {
         Block block = state.getBlock();
         JsonObject t = new JsonObject();
         t.addProperty("name", BuiltInRegistries.BLOCK.getKey(block).toString());
@@ -482,6 +538,14 @@ final class BlockRefGen {
         flag(t, "carpet", block instanceof CarpetBlock);
         flag(t, "leaves", block instanceof LeavesBlock);
         flag(t, "chest_like", block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.ENDER_CHEST);
+        flag(t, "bonemealable", bonemealable(state));
+        if (state == block.defaultBlockState()) {
+            JsonArray drops = new JsonArray();
+            drops(block).forEach(drops::add);
+            if (!drops.isEmpty()) {
+                t.add("drops", drops);
+            }
+        }
 
         float hardness;
         try {
@@ -654,6 +718,138 @@ final class BlockRefGen {
         if (value) {
             t.addProperty(name, true);
         }
+    }
+
+    /**
+     * A random source whose every roll is the lowest possible: 0, false, itself.
+     */
+    static RandomSource luckiest() {
+        return (RandomSource) java.lang.reflect.Proxy.newProxyInstance(BlockRefGen.class.getClassLoader(),
+                new Class<?>[]{RandomSource.class}, (proxy, method, args) -> {
+                    Class<?> r = method.getReturnType();
+                    if (r == int.class) {
+                        return 0;
+                    } else if (r == long.class) {
+                        return 0L;
+                    } else if (r == float.class) {
+                        return 0F;
+                    } else if (r == double.class) {
+                        return 0D;
+                    } else if (r == boolean.class) {
+                        return false;
+                    } else if (RandomSource.class.isAssignableFrom(r)) {
+                        return proxy;
+                    } else if (r == void.class) {
+                        return null;
+                    }
+                    throw new UnsupportedOperationException("RandomSource." + method.getName());
+                });
+    }
+
+    private static ExecRefGen.FakeLevel bonemealLevel;
+
+    /**
+     * Blocks whose bone meal checks need more of a world than the stand-in level has (they
+     * scan chunk sections for neighbours to spread from); exported as not bonemealable. None
+     * of them may be a block FarmProcess scans.
+     */
+    static final Set<String> BONEMEAL_UNKNOWN = new java.util.TreeSet<>();
+
+    /**
+     * {@code BonemealableBlock.isValidBonemealTarget && isBonemealSuccess} for the state alone
+     * in an otherwise empty world, with the luckiest roll: FarmProcess's check without the world.
+     */
+    private static boolean bonemealable(BlockState state) throws Exception {
+        if (!(state.getBlock() instanceof BonemealableBlock b)) {
+            return false;
+        }
+        if (bonemealLevel == null) {
+            ExecRefGen.ExecWorld world = new ExecRefGen.ExecWorld(-16, -16, 32, 32, -16, 48);
+            bonemealLevel = ExecRefGen.fakeLevel(world);
+            setField(Level.class, bonemealLevel, "random", luckiest());
+        }
+        BlockPos pos = new BlockPos(0, 0, 0);
+        bonemealLevel.world.set(0, 0, 0, state);
+        try {
+            return b.isValidBonemealTarget(bonemealLevel, pos, state, BonemealSource.INTERACTION)
+                    && b.isBonemealSuccess(bonemealLevel, luckiest(), pos, state, BonemealSource.INTERACTION);
+        } catch (RuntimeException e) {
+            String name = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+            for (Block farmed : FARM_SCANNED) {
+                if (state.getBlock() == farmed) {
+                    throw new IllegalStateException("bone meal on " + state, e);
+                }
+            }
+            BONEMEAL_UNKNOWN.add(name);
+            return false;
+        } finally {
+            bonemealLevel.world.set(0, 0, 0, Blocks.AIR.defaultBlockState());
+        }
+    }
+
+    /**
+     * The blocks FarmProcess scans for (its {@code Harvest} blocks and the replanting ones).
+     */
+    private static final Block[] FARM_SCANNED = {
+            Blocks.WHEAT, Blocks.CARROTS, Blocks.POTATOES, Blocks.BEETROOTS, Blocks.PUMPKIN, Blocks.MELON,
+            Blocks.NETHER_WART, Blocks.COCOA, Blocks.SUGAR_CANE, Blocks.BAMBOO, Blocks.CACTUS,
+            Blocks.FARMLAND, Blocks.JUNGLE_LOG, Blocks.SOUL_SAND,
+    };
+
+    private static final Map<Block, List<String>> DROPS = new HashMap<>();
+
+    /**
+     * The blocks whose loot roll failed in {@link #drops}, and the first failure.
+     */
+    static int dropsFailures;
+    static Throwable firstDropsFailure;
+
+    /**
+     * {@code BlockOptionalMeta.drops(Block)}, with its mixin accessor
+     * ({@code ILootTable.invokeGetRandomItems}) replaced by reflection on the private
+     * {@code LootTable.getRandomItems(LootContext)}. Item ids, in the loot table's order.
+     * <p>
+     * Like upstream's, a failure means no drops. In 26.3 every roll fails:
+     * {@code LootContext.Builder.create} asks the level for its server, and the
+     * {@code ServerLevelStub} upstream allocates without a constructor has none.
+     */
+    @SuppressWarnings("unchecked")
+    static List<String> drops(Block block) {
+        List<String> cached = DROPS.get(block);
+        if (cached != null) {
+            return cached;
+        }
+        List<String> items = new ArrayList<>();
+        Optional<ResourceKey<LootTable>> key = block.getLootTable();
+        if (key.isPresent()) {
+            try {
+                ServerLevel level = BlockOptionalMeta.ServerLevelStub.fastCreate();
+                LootParams.Builder builder = new LootParams.Builder(level)
+                        .withParameter(LootContextParams.ORIGIN, Vec3.ZERO)
+                        .withParameter(LootContextParams.BLOCK_STATE, block.defaultBlockState())
+                        .withParameter(LootContextParams.TOOL, new ItemStack(Items.NETHERITE_PICKAXE, 1));
+                // getDrops(Block, LootParams.Builder)
+                LootParams params = builder.withParameter(LootContextParams.BLOCK_STATE, block.defaultBlockState())
+                        .create(LootContextParamSets.BLOCK);
+                BlockOptionalMeta.ServerLevelStub stub = (BlockOptionalMeta.ServerLevelStub) params.getLevel();
+                LootTable table = stub.holder().getLootTable(key.get());
+                Method getRandomItems = LootTable.class.getDeclaredMethod("getRandomItems", LootContext.class);
+                getRandomItems.setAccessible(true);
+                List<ItemStack> stacks = (List<ItemStack>) getRandomItems.invoke(table,
+                        new LootContext.Builder(params).withOptionalRandomSeed(1).create(null));
+                for (ItemStack stack : stacks) {
+                    items.add(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+                }
+            } catch (Throwable e) {
+                items.clear();
+                dropsFailures++;
+                if (firstDropsFailure == null) {
+                    firstDropsFailure = e;
+                }
+            }
+        }
+        DROPS.put(block, items);
+        return items;
     }
 
     private static String ternary(Ternary t) {

@@ -190,7 +190,8 @@ impl PathingControlManager {
 
     pub fn execute_processes(baritone: &mut Baritone) -> Option<PathingCommand> {
         for index in 0..baritone.processes.len() {
-            let active = baritone.process(index).is_active(baritone);
+            let active =
+                baritone.with_process(index, |process, baritone| process.is_active(baritone));
             let this = &mut baritone.pathing_control_manager;
             if active {
                 if !this.active.contains(&index) {
@@ -222,12 +223,14 @@ impl PathingControlManager {
             });
             match exec {
                 None => {
-                    if baritone.process(proc).is_active(baritone) {
-                        panic!(
-                            "{} actively returned null PathingCommand",
-                            baritone.process(proc).display_name(baritone)
-                        );
-                    }
+                    baritone.with_process(proc, |process, baritone| {
+                        if process.is_active(baritone) {
+                            panic!(
+                                "{} actively returned null PathingCommand",
+                                process.display_name(baritone)
+                            );
+                        }
+                    });
                     // no need to call onLostControl; they are reporting inactive.
                 }
                 Some(exec) if exec.command_type != PathingCommandType::Defer => {

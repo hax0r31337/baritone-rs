@@ -42,6 +42,15 @@ impl BetterBlockPos {
         Self::long_hash(self.x, self.y, self.z) as i32
     }
 
+    /// `Vec3i.hashCode()`: the hash of a plain `BlockPos` at this position, for maps whose
+    /// keys upstream are `BlockPos`, not `BetterBlockPos`.
+    pub fn block_pos_hash_code(&self) -> i32 {
+        self.y
+            .wrapping_add(self.z.wrapping_mul(31))
+            .wrapping_mul(31)
+            .wrapping_add(self.x)
+    }
+
     /// `longHash(BetterBlockPos)`
     pub fn long_hash_pos(pos: BetterBlockPos) -> i64 {
         Self::long_hash(pos.x, pos.y, pos.z)

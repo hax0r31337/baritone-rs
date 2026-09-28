@@ -3,7 +3,9 @@
 // `minecraft()` is `options()`, the one part of `Minecraft` ported code reads. `worldData()`
 // (the chunk cache) and `viewerPos()` (rendering) are not ported. `player()` and `world()`
 // panic when there is none, where upstream would throw a `NullPointerException`; callers that
-// care check `is_in_world` first, like upstream's null checks.
+// care check `is_in_world` first, like upstream's null checks. `entities()` leaves out the
+// local player, which upstream's includes; callers that went through it skip the player
+// anyway. `entitiesStream()` is `entities().iter()`.
 
 use std::sync::Arc;
 
@@ -40,27 +42,7 @@ pub trait IPlayerContext {
     fn object_mouse_over(&self) -> BlockHitResult;
 
     fn player_feet(&self) -> BetterBlockPos {
-        // TODO find a better way to deal with soul sand!!!!!
-        let player = self.player();
-        let feet = BetterBlockPos::from_f64(
-            player.position.x,
-            player.position.y + 0.1251,
-            player.position.z,
-        );
-
-        // sometimes when calling this from another thread or while world is null, it'll throw a NullPointerException
-        // that causes the game to immediately crash
-        //
-        // so of course crashing on 2b is horribly bad due to queue times and logout spot
-        // catch the NPE and ignore it if it does happen
-        //
-        // this does not impact performance at all since we're not null checking constantly
-        // if there is an exception, the only overhead is Java generating the exception object... so we can ignore it
-        if self.world().get_block_state(feet).slab.is_some() {
-            return feet.above();
-        }
-
-        feet
+        player_feet(self.player(), self.world())
     }
 
     fn player_feet_as_vec(&self) -> Vec3 {
@@ -98,4 +80,28 @@ pub trait IPlayerContext {
     fn is_looking_at(&self, pos: BetterBlockPos) -> bool {
         self.get_selected_block() == Some(pos)
     }
+}
+
+/// `playerFeet()` of `player` in `world`, for code that works on a snapshot of the two.
+pub fn player_feet(player: &Player, world: &World) -> BetterBlockPos {
+    // TODO find a better way to deal with soul sand!!!!!
+    let feet = BetterBlockPos::from_f64(
+        player.position.x,
+        player.position.y + 0.1251,
+        player.position.z,
+    );
+
+    // sometimes when calling this from another thread or while world is null, it'll throw a NullPointerException
+    // that causes the game to immediately crash
+    //
+    // so of course crashing on 2b is horribly bad due to queue times and logout spot
+    // catch the NPE and ignore it if it does happen
+    //
+    // this does not impact performance at all since we're not null checking constantly
+    // if there is an exception, the only overhead is Java generating the exception object... so we can ignore it
+    if world.get_block_state(feet).slab.is_some() {
+        return feet.above();
+    }
+
+    feet
 }

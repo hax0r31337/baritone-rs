@@ -3,7 +3,9 @@
 // The listeners are fixed: the behaviors in registration order (look, pathing, inventory, input
 // override), then the pathing control manager's post tick. `WaypointBehavior` and the world
 // provider (chunk cache) are not ported, and no kept listener handles chunk, block change or
-// chat events. Path events, which only outside listeners receive, are collected for the host
+// chat events. Of the world provider, a world event resets which chunks are cached, and
+// `Baritone::on_tick` marks the loaded chunks cached, since the host sends no chunk events.
+// Path events, which only outside listeners receive, are collected for the host
 // (`Baritone::take_path_events`).
 
 use crate::Baritone;
@@ -11,6 +13,7 @@ use crate::api::event::events::tick_event;
 use crate::api::event::events::r#type::EventState;
 use crate::api::event::events::{PathEvent, RotationMoveEvent};
 use crate::behavior::{InventoryBehavior, PathingBehavior};
+use crate::cache::CachedWorld;
 use crate::utils::{BlockStateInterface, PathingControlManager};
 
 #[derive(Debug, Default)]
@@ -57,7 +60,11 @@ impl GameEventHandler {
             .on_player_rotation_move(&baritone.player_context, event);
     }
 
-    pub fn on_world_event(baritone: &mut Baritone, _state: EventState) {
+    pub fn on_world_event(baritone: &mut Baritone, state: EventState) {
+        if state == EventState::Post {
+            // closeWorld / initWorld: nothing is kept on disk, so a new world starts empty
+            baritone.cached_world = CachedWorld::new();
+        }
         baritone
             .look_behavior
             .on_world_event(&mut baritone.player_context);

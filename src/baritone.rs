@@ -26,8 +26,15 @@
 // pathing (which Baritone does through `Options::auto_jump`; the client copies the option into
 // the player in `sendPosition`, so a change takes effect on the next tick's move).
 //
-// Not ported: the game directory, the command manager, the selection manager, the world
-// provider (chunk cache), `openClick`, and every process but the two in `crate::process`.
+// The world provider is not ported; of its cache, only which chunks are cached is kept
+// (`cached_world`, for the explore process), and the host has no chunk events, so `on_tick`
+// marks the loaded chunks cached.
+//
+// Background work (`Baritone.getExecutor()`) runs on `executor`, one per `Baritone` where
+// upstream shares a static pool, so a host (or a test) can wait for this Baritone's work.
+//
+// Not ported: the game directory, the command manager, the selection manager, `openClick`,
+// the builder and the elytra process.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -39,9 +46,14 @@ use crate::api::process::IBaritoneProcess;
 use crate::api::utils::{IPlayerContext, IPlayerController};
 use crate::behavior::look::ForkableRandom;
 use crate::behavior::{InventoryBehavior, LookBehavior, PathingBehavior};
+use crate::cache::CachedWorld;
 use crate::event::GameEventHandler;
 use crate::host::{Entity, Player, World};
-use crate::process::{CustomGoalProcess, InventoryPauserProcess};
+use crate::java::Executor;
+use crate::process::{
+    BackfillProcess, CustomGoalProcess, ExploreProcess, FarmProcess, FollowProcess,
+    GetToBlockProcess, InventoryPauserProcess, MineProcess,
+};
 use crate::utils::player::BaritonePlayerContext;
 use crate::utils::{BlockStateInterface, InputOverrideHandler, PathingControlManager};
 
@@ -61,6 +73,12 @@ pub struct Baritone {
     pub(crate) pathing_control_manager: PathingControlManager,
 
     pub(crate) player_context: BaritonePlayerContext,
+
+    /// `getWorldProvider().getCurrentWorld().getCachedWorld()`
+    pub(crate) cached_world: CachedWorld,
+
+    /// `Baritone.getExecutor()`
+    pub(crate) executor: Executor,
 
     pub bsi: Option<BlockStateInterface>,
 }
@@ -85,10 +103,18 @@ impl Baritone {
             pathing_control_manager: PathingControlManager::new(),
             // Define this before behaviors try and get it, or else it will be null and the builds will fail!
             player_context: BaritonePlayerContext::new(player_controller),
+            cached_world: CachedWorld::new(),
+            executor: Executor::new(),
             bsi: None,
         };
+        baritone.register_process(Box::new(FollowProcess::new()));
+        baritone.register_process(Box::new(MineProcess::new()));
         baritone.register_process(Box::new(CustomGoalProcess::new())); // very high iq
+        baritone.register_process(Box::new(GetToBlockProcess::new()));
+        baritone.register_process(Box::new(ExploreProcess::new()));
+        baritone.register_process(Box::new(FarmProcess::new()));
         baritone.register_process(Box::new(InventoryPauserProcess::new()));
+        baritone.register_process(Box::new(BackfillProcess::new()));
         baritone
     }
 
@@ -136,6 +162,36 @@ impl Baritone {
             .find_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Runs `f` on the registered process of type `T`, taken out of the `Baritone` meanwhile
+    /// (see [`Self::with_process`]), for a process method that reaches the `Baritone`.
+    pub(crate) fn with_process_of<T: 'static, R>(
+        &mut self,
+        f: impl FnOnce(&mut T, &mut Baritone) -> R,
+    ) -> R {
+        let index = self
+            .processes
+            .iter()
+            .position(|p| p.as_ref().is_some_and(|p| p.as_any().is::<T>()))
+            .expect("the process is registered and not running");
+        self.with_process(index, |process, baritone| {
+            let process = process
+                .as_any_mut()
+                .downcast_mut::<T>()
+                .expect("the process at its index");
+            f(process, baritone)
+        })
+    }
+
+    /// `Baritone.getExecutor()`: where processes run their background work.
+    pub fn get_executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    /// `getWorldProvider().getCurrentWorld().getCachedWorld()`
+    pub fn get_cached_world(&self) -> &CachedWorld {
+        &self.cached_world
+    }
+
     pub fn get_pathing_control_manager(&self) -> &PathingControlManager {
         &self.pathing_control_manager
     }
@@ -178,6 +234,37 @@ impl Baritone {
     pub fn get_inventory_pauser_process_mut(&mut self) -> &mut InventoryPauserProcess {
         self.find_process_mut()
             .expect("the inventory pauser process is running")
+    }
+
+    pub fn get_follow_process(&self) -> &FollowProcess {
+        self.find_process().expect("the follow process is running")
+    }
+
+    pub fn get_follow_process_mut(&mut self) -> &mut FollowProcess {
+        self.find_process_mut()
+            .expect("the follow process is running")
+    }
+
+    pub fn get_mine_process(&self) -> &MineProcess {
+        self.find_process().expect("the mine process is running")
+    }
+
+    pub fn get_get_to_block_process(&self) -> &GetToBlockProcess {
+        self.find_process()
+            .expect("the get to block process is running")
+    }
+
+    pub fn get_explore_process(&self) -> &ExploreProcess {
+        self.find_process().expect("the explore process is running")
+    }
+
+    pub fn get_explore_process_mut(&mut self) -> &mut ExploreProcess {
+        self.find_process_mut()
+            .expect("the explore process is running")
+    }
+
+    pub fn get_farm_process(&self) -> &FarmProcess {
+        self.find_process().expect("the farm process is running")
     }
 
     pub fn get_pathing_behavior(&self) -> &PathingBehavior {
@@ -229,6 +316,12 @@ impl Baritone {
 
     /// `TickEvent`, `IN` when there is a player and a world.
     pub fn on_tick(&mut self) {
+        // ChunkEvent: upstream caches a chunk when the client loads it
+        if let Some(world) = &self.player_context.world {
+            for (x, z) in world.loaded_chunks() {
+                self.cached_world.queue_for_packing(x, z);
+            }
+        }
         let event_type = if self.player_context.is_in_world() {
             tick_event::Type::In
         } else {

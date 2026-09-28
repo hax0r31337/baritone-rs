@@ -12,6 +12,11 @@
 // Upstream's `forUseOnAnotherThread` copy of the chunk map still sees block updates in the
 // chunks it copied; a snapshot does not. Processes rebuild their context every tick, so the
 // context execution reads is at most a tick old.
+//
+// Code that reaches the player through the context's `baritone` (`MineProcess.searchWorld`)
+// reads `player`, the snapshot the context was built from. The one subclass that is ported,
+// `GetToBlockProcess.GetToBlockCalculationContext`, is a context whose `kind` says which
+// method it overrides.
 
 use std::sync::Arc;
 
@@ -27,11 +32,24 @@ use crate::utils::{BlockStateInterface, ToolSet};
 /// `Items.WATER_BUCKET`
 pub(crate) const STACK_BUCKET_WATER: &str = "minecraft:water_bucket";
 
+/// Which class a [`CalculationContext`] is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CalculationContextKind {
+    #[default]
+    CalculationContext,
+    /// `GetToBlockProcess.GetToBlockCalculationContext`: `breakCostMultiplierAt` is always 1.
+    GetToBlock,
+}
+
 #[derive(Clone)]
 pub struct CalculationContext {
+    pub kind: CalculationContextKind,
     pub safe_for_threaded_use: bool,
     /// The world snapshot `bsi` reads (upstream: the live client world).
     pub world: Arc<World>,
+    /// The player the context was built from (upstream reaches the live one through
+    /// `baritone`).
+    pub player: Arc<Player>,
     pub bsi: BlockStateInterface,
     pub tool_set: ToolSet,
     pub has_water_bucket: bool,
@@ -119,8 +137,10 @@ impl CalculationContext {
         // then you get a wildly inconsistent path that isn't optimal for either scenario.
         let world_border = BetterWorldBorder::new(&world.border());
         Self {
+            kind: CalculationContextKind::CalculationContext,
             safe_for_threaded_use: for_use_on_another_thread,
             world,
+            player,
             bsi,
             tool_set,
             has_water_bucket,
@@ -201,6 +221,9 @@ impl CalculationContext {
     }
 
     pub fn break_cost_multiplier_at(&self, x: i32, y: i32, z: i32, current: &BlockState) -> f64 {
+        if self.kind == CalculationContextKind::GetToBlock {
+            return 1.0;
+        }
         if !self.allow_break && !self.allow_break_anyway.contains(&current.name) {
             return COST_INF;
         }

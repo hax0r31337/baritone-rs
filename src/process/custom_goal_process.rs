@@ -83,7 +83,7 @@ impl CustomGoalProcess {
 }
 
 impl IBaritoneProcess for CustomGoalProcess {
-    fn is_active(&self, _baritone: &Baritone) -> bool {
+    fn is_active(&mut self, _baritone: &mut Baritone) -> bool {
         self.state != State::None
     }
 
@@ -153,7 +153,7 @@ impl IBaritoneProcess for CustomGoalProcess {
         self.lost_control();
     }
 
-    fn display_name0(&self) -> String {
+    fn display_name0(&mut self, _baritone: &mut Baritone) -> String {
         match &self.goal {
             Some(goal) => format!("Custom Goal {goal}"),
             None => "Custom Goal null".to_owned(),

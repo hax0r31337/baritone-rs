@@ -3,7 +3,7 @@
 This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) that asks about Minecraft
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
 upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
-table version 3); the field list is at the end. Item and player checks map to `crate::host::player`
+table version 4); the field list is at the end. Item and player checks map to `crate::host::player`
 (Table D), other entities to `crate::host::Entity`. Locations are `File.java:line`; every file name used
 here is unique in the kept scope. `MH` = `MovementHelper.java`.
 
@@ -12,7 +12,9 @@ and `tests/reference_block_states.rs` checks the Rust side of every row it can r
 the MovementHelper block checks, PrecomputedData, BetterWorldBorder) against the real upstream code, for
 every state and in random worlds. When a new check needs a new field: add it to `BlockState`, export it
 in `BlockRefGen.traits`, bump `BlockStateTable::VERSION`, and add a row here. `tests/reference_paths.rs`
-covers the movement rows through the real upstream path finder (every `Moves` result and whole paths).
+covers the movement rows through the real upstream path finder (every `Moves` result and whole paths),
+and `tests/reference_execution.rs` the process rows through the real upstream processes (mining,
+getting to blocks, following, exploring, farming, backfilling).
 Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`, `WATER`,
 `LADDER || VINE`) are helpers in `src/pathing/movement/movements/mod.rs`.
 
@@ -51,7 +53,7 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 
 | Upstream | Proposed trait | Locations | What the check does |
 |---|---|---|---|
-| `AIR` | `air` + the table's air state (`BlockStateTable::air`) | BlockStateInterface.java:56,101,170-171 | Returned for out-of-range Y, unloaded chunks and empty sections |
+| `AIR` | `air` + the table's air state (`BlockStateTable::air`); `default_state == air().default_state` | BlockStateInterface.java:56,101,170-171; BackfillProcess.java:907,953 | Two uses: returned for out-of-range Y, unloaded chunks and empty sections; the only block Backfill fills in (not cave or void air) |
 | `BAMBOO` | `name` | FarmProcess.java:91,134 | Farm pickup item list; harvest target |
 | `BEDROCK` | `name` | MineProcess.java:497 | Bedrock both above and below → `plausibleToBreak` is false |
 | `BEETROOTS` | `name` + `properties.age` | FarmProcess.java:120 | Crop harvest target (max age 3) |
@@ -60,12 +62,13 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `BUBBLE_COLUMN` | `can_walk_through` (NO), `avoid_walking_into`, `can_walk_on` | MH:146,380,410 | Walk-through NO; avoid; excluded from the normal-cube walk-on YES |
 | `CACTUS` | `avoid_walking_into`; `name` | MH:375; FarmProcess.java:92,143 | Two uses: damage avoidance, and farm pickup/harvest |
 | `CARROTS` | `name` + `properties.age` | FarmProcess.java:118 | Crop harvest target (max age 7) |
-| `CHEST` | `chest_like`; `can_walk_on` (YES) | MH:422; GetToBlockProcess.java:246,254 | Two uses: walk-on YES (0.875-high shape), and GetToBlock right-click / clear the block on top |
+| `CHEST` | `chest_like`; `can_walk_on` (YES); `name` | MH:422; GetToBlockProcess.java:246,254 | Two uses: walk-on YES (0.875-high shape), and GetToBlock right-click / clear the block on top |
 | `COBWEB` | `can_walk_through` (NO), `fully_passable` (NO), `avoid_walking_into` | MH:146,241,379 | Slows movement: never walk through, never fully passable, avoid |
 | `COCOA` | `can_walk_through` (NO), `fully_passable` (NO); `name` + `properties.age` | MH:146,244; FarmProcess.java:124 | Two uses: passability, and farm harvest when age ≥ 2 |
 | `CRAFTING_TABLE` | `name` | GetToBlockProcess.java:246 | Right-click container on arrival |
+| `DIRT` | `name` lookup (`BlockStateTable::get_default_state`) → `collision_shape` | BackfillProcess.java:954 | What Backfill checks placement for; a full block if the table has no dirt |
 | `DIRT_PATH` | `can_walk_on` (YES) | MH:419 | Walkable although shorter than a full block (`farmland`/dirt-path flag; only used inside the tri-state) |
-| `ENDER_CHEST` | `chest_like`; `can_walk_on` (YES) | MH:422; GetToBlockProcess.java:246,254 | Same as `CHEST` |
+| `ENDER_CHEST` | `chest_like`; `can_walk_on` (YES); `name` | MH:422; GetToBlockProcess.java:246,254 | Same as `CHEST` |
 | `END_PORTAL` | `can_walk_through` (NO), `avoid_walking_into` | MH:146,378 | Never path into an end portal |
 | `END_ROD` | `can_walk_through` (NO) | MH:146 | Forced not walk-through |
 | `FARMLAND` | `farmland`; `can_walk_on` (YES); `name` | MH:419; MovementParkour.java:146; FarmProcess.java:203,234 | Three uses: walk-on YES, parkour must not land on it (trampling), farm plant target |
@@ -93,7 +96,7 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `SUGAR_CANE` | `name` | FarmProcess.java:90,125 | Farm pickup item; harvest target |
 | `SWEET_BERRY_BUSH` | `can_walk_through` (NO), `avoid_walking_into` | MH:146,376 | Damages the player |
 | `TALL_GRASS` | `replaceable` | MH:319 | Same as `LARGE_FERN` |
-| `TRAPPED_CHEST` | `chest_like`; `can_walk_on` (YES) | MH:422; GetToBlockProcess.java:246,254 | Same as `CHEST` |
+| `TRAPPED_CHEST` | `chest_like`; `can_walk_on` (YES); `name` | MH:422; GetToBlockProcess.java:246,254 | Same as `CHEST` |
 | `TRIPWIRE` | `fully_passable` (NO); `name` | MH:240; Settings.java:241 | Never fully passable; also in the default `blocksToAvoid` |
 | `TWISTING_VINES` | `climbable = NetherVine` | MH:599 | `isClimbable` |
 | `TWISTING_VINES_PLANT` | `climbable = NetherVine` | MH:600 | `isClimbable` |
@@ -114,11 +117,11 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `BambooStalkBlock` | `normal_cube`; `name` | MH:778; FarmProcess.java:138 | Two uses: excluded from normal cube (offset shape), and bamboo replant check |
 | `BaseFireBlock` | `fire` (new) | MH:146,239,377; RotationUtils.java:248,290; VecUtils.java:61 | Several uses: never walk through / fully passable, avoid; for aiming, hitting the block below counts as hitting the fire, and the aim point is its bottom |
 | `BlockItem` | item → block `name` | InventoryBehavior.java:173,176 | Throwaway that matches the builder's desired state; `placeAt` is always null without BuilderProcess, so this is dead code in the port |
-| `BonemealableBlock` | `bonemealable` (new) | FarmProcess.java:259-261 | `isValidBonemealTarget` + `isBonemealSuccess`. Vanilla makes these world-dependent, so the host approximates them |
+| `BonemealableBlock` | `bonemealable` (new, v4) | FarmProcess.java:259-261 | `isValidBonemealTarget` + `isBonemealSuccess`. Vanilla makes these world-dependent (bamboo counts its height, saplings roll the dice), so the host evaluates the state alone in an empty world with the luckiest roll. For the crops and cocoa Farm scans the result is exact. refgen exports false for the two blocks whose check scans chunk sections (netherrack, pitcher crop) |
 | `CactusBlock` | `name` | FarmProcess.java:147 | Replant check: cactus below |
 | `CarpetBlock` | `carpet` (new) | MH:165,194,456; MovementPillar.java:100; MovementTraverse.java:165 | Walk-through MAYBE → needs walkable below; water under a carpet can be walked on; cannot pillar or backplace |
 | `CauldronBlock` | `can_walk_through` (NO) | MH:181 | Empty cauldron only |
-| `CropBlock` (cast, `isMaxAge`) | `name` + `properties.age` | FarmProcess.java:117-120,156 | Crop is ripe at max age |
+| `CropBlock` (cast, `isMaxAge`) | `name` + `properties.age` against the crop's maximum age (7, beetroots 3; in `Harvest`) | FarmProcess.java:117-120,156 | Crop is ripe at max age |
 | `DoorBlock` | `openable = Door` (+ `open`, `facing`, `hand_openable`) | MH:158,246,331; MovementTraverse.java:226,227 | Walk-through YES unless iron; never fully passable; runtime open/facing check; right-click to open |
 | `EndPortalBlock` | `fully_passable` (NO) | MH:251 | |
 | `FallingBlock` | `falls` | MH:93,629; MovementAscend.java:96; MovementDescend.java:138; MovementPillar.java:113,118; MineProcess.java:261 | Several uses: avoid breaking next to an unsupported falling block, add the cost of the falling stack, block the move if something would fall on the player, mining goal shape |
@@ -141,8 +144,9 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `TrapDoorBlock` | `openable = TrapDoor` (+ `open`, `half`) | MH:146,250,547 | Walk-through NO; never fully passable; a closed top trapdoor is solid when waterlogged |
 | `WaterFluid` (fluid type) | `fluid == Water` | MH:227; MovementFall.java:103; MovementParkour.java:81 | Several uses: still water is walk-through, landing in water in Fall, a water-exempt avoid check |
 
-Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.java:76-79), `ItemEntity`,
-`BlockHitResult`, packets, `ClientLevel`, Movement*/PathNode/goal classes.
+Skipped as non-block (entities and items are in Table D): `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman`
+(Avoidance.java:76-79), `ItemEntity`, `InventoryMenu`, `BlockHitResult`, packets, `ClientLevel`,
+Movement*/PathNode/goal classes.
 
 ## Table C: State properties and other block-state API
 
@@ -179,9 +183,13 @@ Skipped as non-block: `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman` (Avoidance.jav
 | `harvest.block == state.getBlock()`, scan block lists | `name` | FarmProcess.java:172,198-207 | Farm target matching / chunk scan |
 | `BlockUtils.stringToBlockRequired` | `name` registry | BlockOptionalMeta.java:98 | Parse the selector id |
 | `getStateDefinition().getProperty`, `Property.getValue(String)` | `properties` (keys/values per name) | BlockOptionalMeta.java:123,124 | Parse and validate `[k=v]` |
-| `getPossibleStates()`, `state.getValue(prop)` | all state ids with that `name` + `properties` | BlockOptionalMeta.java:86,104,135,137 | Selector → set of states |
-| state identity (`hashCode`, `==`) | state id | BlockOptionalMeta.java:145,168,173; BlockOptionalMetaLookup.java:72-78 | `matches` / `has(state)` |
-| loot table drops (`getLootTable`, default state, netherite pickaxe) | `drops` (new) | BlockOptionalMeta.java:154,223-256 | Item stacks that count as "mined" (MineProcess.java:78,350) |
+| `getPossibleStates()`, `state.getValue(prop)` | `BlockStateTable::get_possible_states(name)` filtered by the selected `properties` | BlockOptionalMeta.java:86,104,135,137 | Selector → set of states |
+| state identity (`hashCode`, `==`) | `name` + the selected `properties`: the same set of states, without holding ids | BlockOptionalMeta.java:145,168,173; BlockOptionalMetaLookup.java:72-78 | `matches` / `has(state)` |
+| loot table drops (`getLootTable`, default state, netherite pickaxe) | `drops` (new, v4) | BlockOptionalMeta.java:154,223-256 | Item stacks that count as "mined" (MineProcess.java:78,350). **In 26.3 upstream's roll always fails** (`LootContext.Builder.create` asks the stub level for its server, which is null), so every block drops nothing: `mine` quantities are never reached and dropped items never match. The Java-semantics table reproduces that (all empty); a host that sends real drops gets what upstream intends |
+| `CachedChunk.BLOCKS_TO_KEEP_TRACK_OF` + `getLocationsOf` (the chunk cache) | none: every block is untracked, so the loaded chunks are scanned for it (`FasterWorldScanner`) | MineProcess.java:364-390 | Upstream finds chests, furnaces, portals, beds, ... in its cache, which holds the loaded chunks too |
+| `PalettedContainer` palette and storage (mixin accessors) | `PalettedStorage::palette`, `is_single_value`, `palette_index` | FasterWorldScanner.java:358-415 | Skip sections without a matching state; a single-valued section is scanned x, y, z, others y, z, x |
+| `state.getCollisionShape(world, pos)`, `level.isUnobstructed(null, shape)` | `collision_shape`; the player's box and the boxes of entities with `blocks_building` | BuilderProcess.java:342-345 (`placementPlausible`, for Backfill) | Nothing stands where the block would go |
+| `level.getChunk(pos) instanceof EmptyLevelChunk` (not block data) | `!World::has_chunk` | BackfillProcess.java:907 | Forget positions in unloaded chunks |
 | `ctx.world().dimension() == Level.NETHER` (not block data) | world `water_evaporates` (new, world-level) | CalculationContext.java:104; MovementFall.java:105 | No water-bucket falls in the Nether |
 | `getEntitiesOfClass(FallingBlockEntity)` (not block data) | `ctx.entities()` with `type_id == "minecraft:falling_block"` whose `bounding_box` intersects | Movement.java:159 | Pause mining while falling blocks are in the air |
 
@@ -211,10 +219,17 @@ data driven. `tools/refgen` exports real 26.3 items (`tests/fixtures/reference/p
 | `containerMenu != inventoryMenu`, `getItemBySlot(OFFHAND)`, `getLightLevelDependentMagicValue()` | `container_open`, `offhand`, `light_level_dependent_magic_value` | InventoryBehavior.java:64,208; Avoidance.java:77 | |
 | `instanceof Mob`, `Spider`, `ZombifiedPiglin` + `getLastHurtByMob() != null`, `Enderman` + `isCreepy()` | `Entity::mob`, `type_id` (spider, cave spider), `provoked`, `creepy` | Avoidance.java:76-79 | Mob avoidance |
 | `options.sensitivity()`, `options.autoJump()` | `Options::sensitivity`, `Options::auto_jump` | LookBehavior.java:305; PathingBehavior.java:246-250 | Mouse steps; no auto jump while pathing |
+| `instanceof ItemEntity`, `getItem()` | `Entity::as_item_entity` (`type_id == "minecraft:item"`, `Entity::item`) | MineProcess.java:348-351; FollowProcess.java:130; FarmProcess.java:820-823 | Dropped items to mine toward, pick up, or farm |
+| `entity.isAlive()`, `entity.onGround()`, `entity.equals(other)`, `distanceToSqr(player)` | `Entity::alive`, `on_ground`, equal `id`s, `distance_to_sqr` | FollowProcess.java:81-91; FarmProcess.java:821 | Followable entities; items lying on the ground |
+| `entity.blocksBuilding`, `isRemoved()`, spectators (`EntitySelector.NO_SPECTATORS`) | `Entity::blocks_building` (the host leaves out spectators and removed entities); the local player always counts | BuilderProcess.java:344 | `placementPlausible` |
+| `getNonEquipmentItems()`, `ItemStack.getCount()` | the 36 main slots, `ItemStack::count` | MineProcess.java:77-79 | Mined enough |
+| `getBaritoneHash()` (mixin) minus the damage | the item id (`ItemStack::get_item`) | BlockOptionalMeta.java:748-755; BlockOptionalMetaLookup.java:87-91 | Item stacks that match a block's drops |
+| `Items.X`, `stack.getItem() == item`, `stack.is(item)` | item ids | FarmProcess.java:511-537,623-637 | Plantable seeds, bone meal, cocoa beans, pickup list |
+| `containerMenu instanceof InventoryMenu` | `!Player::container_open` | GetToBlockProcess.java:759 | Right-clicking a container opened it |
 
 ## Trait fields
 
-`crate::host::BlockState`, table version 3. Serialized as JSON with these names; enum values are
+`crate::host::BlockState`, table version 4. Serialized as JSON with these names; enum values are
 snake_case (`"nether_vine"`), `Option` fields are absent or `null` when unset, and every field except
 `name` and the three tri-states defaults to false / zero / empty. "(new)" marks fields the plan's
 trait table does not list.
@@ -254,6 +269,8 @@ trait table does not list.
 | `carpet` (new) | `bool` | Java `CarpetBlock` |
 | `leaves` (new) | `bool` | Java `LeavesBlock` |
 | `chest_like` | `bool` | Chest, trapped chest, ender chest |
+| `bonemealable` (new, v4) | `bool` | `isValidBonemealTarget && isBonemealSuccess` for the state alone in an empty world, with the luckiest roll (Table B) |
+| `drops` (new, v4) | `[item id]` | Read from the block's default state: its loot with a netherite pickaxe and loot seed 1, the items `BlockOptionalMeta` matches. Empty for every block in the Java-semantics table (Table C) |
 | `hardness` | `f32` | `getDestroySpeed(null, null)`; < 0 means unbreakable (also when it throws) |
 | `requires_tool` | `bool` | `requiresCorrectToolForDrops()` |
 | `collision_shape`, `outline_shape` | `Vec<Aabb>` | Aim points, raytrace, position checks. Computed with no world and an empty collision context; a shape that moves with the block's `offset` is stored unmoved |
@@ -262,14 +279,8 @@ trait table does not list.
 
 Version 2 replaced the planned `harvest_tools` / `required_tier` with `tags` and the items' own tool
 rules, which reproduce `Tool.getMiningSpeed` exactly (swords, shears and tier denial rules included).
-Version 3 added what raytraces need: interaction shapes and position offsets.
-
-Not in version 3, added with the code that reads them:
-
-| Field | Type | Meaning | Phase |
-|---|---|---|---|
-| `drops` (new) | `[item name]` | Default-state loot with a netherite pickaxe (the BlockOptionalMeta stack match). Needs loot tables | 5 |
-| `bonemealable` (new) | `bool` | Approximates `isValidBonemealTarget && isBonemealSuccess` | 5 |
+Version 3 added what raytraces need: interaction shapes and position offsets. Version 4 added what
+the processes read: `bonemealable` and `drops`.
 
 Not needed: `bubble_column` and `end_portal` from the plan. Upstream only reads them inside the tri-states
 and `avoid_walking_into`, so they stay host-internal.

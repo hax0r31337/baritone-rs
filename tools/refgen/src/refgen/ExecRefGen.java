@@ -11,9 +11,14 @@ import baritone.api.event.events.RotationMoveEvent;
 import baritone.api.event.events.SprintStateEvent;
 import baritone.api.event.events.TickEvent;
 import baritone.api.event.events.type.EventState;
+import baritone.api.cache.IWorldScanner;
 import baritone.api.event.listener.AbstractGameEventListener;
 import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.process.PathingCommand;
 import baritone.api.utils.BetterBlockPos;
+import baritone.api.utils.BlockOptionalMeta;
+import baritone.api.utils.BlockOptionalMetaLookup;
+import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.IPlayerController;
 import baritone.api.utils.RayTraceUtils;
 import baritone.api.utils.Rotation;
@@ -24,13 +29,25 @@ import baritone.behavior.InventoryBehavior;
 import baritone.behavior.LookBehavior;
 import baritone.behavior.PathingBehavior;
 import baritone.behavior.look.ForkableRandom;
+import baritone.cache.CachedChunk;
+import baritone.cache.CachedRegion;
+import baritone.cache.CachedWorld;
+import baritone.cache.FasterWorldScanner;
+import baritone.cache.WorldData;
 import baritone.cache.WorldProvider;
 import baritone.event.GameEventHandler;
 import baritone.pathing.path.PathExecutor;
+import baritone.process.BackfillProcess;
 import baritone.process.BuilderProcess;
 import baritone.process.CustomGoalProcess;
+import baritone.process.ExploreProcess;
+import baritone.process.FarmProcess;
+import baritone.process.FollowProcess;
+import baritone.process.GetToBlockProcess;
 import baritone.process.InventoryPauserProcess;
+import baritone.process.MineProcess;
 import baritone.process.elytra.NullElytraProcess;
+import baritone.utils.BaritoneProcessHelper;
 import baritone.utils.InputOverrideHandler;
 import baritone.utils.PathingControlManager;
 import baritone.utils.PlayerMovementInput;
@@ -60,7 +77,9 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeMap;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.Inventory;
@@ -68,6 +87,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -75,16 +95,21 @@ import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BeetrootBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.LadderBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.IntegerProperty;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -99,14 +124,18 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.util.Mth;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -115,24 +144,31 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
 /**
  * Runs the real upstream execution code (PathingBehavior, PathExecutor, the movements'
  * updateState, LookBehavior, InventoryBehavior, InputOverrideHandler with its break and place
- * helpers, PathingControlManager, CustomGoalProcess) tick by tick around a simulated client,
- * and records what happens every tick. The Rust side (tests/common/sim.rs) runs the same
+ * helpers, PathingControlManager, the processes) tick by tick around a simulated client, and
+ * records what happens every tick. The Rust side (tests/common/sim.rs) runs the same
  * simulation around the port; keep the two in sync operation for operation.
  * <p>
  * The client objects are stand-ins allocated without a constructor (Minecraft, ClientLevel and
- * its chunk cache, LocalPlayer, MultiPlayerGameMode, Options), over a world held here. The
- * Baritone is allocated the same way and wired with the real behaviors, the real control
- * manager and the two processes the port has.
+ * its chunk cache and entities, LocalPlayer, MultiPlayerGameMode, Options, the world provider's
+ * cached world), over a world held here. The Baritone is allocated the same way and wired with
+ * the real behaviors, the real control manager and the processes the port has.
  * <p>
- * A tick holds {@code pathPlanLock} while Baritone and the player tick, then waits for a
- * running calculation to finish, then applies the blocks broken and placed during the tick: a
- * calculation reads the live world, so the world may not change while it runs.
+ * A tick holds {@code pathPlanLock} while Baritone ticks, the background work its processes
+ * started runs ({@link GatedExecutor}) and the player ticks, then waits for a running
+ * calculation to finish, then applies the blocks broken and placed during the tick and loads
+ * the chunks around the player (if the scenario loads chunks): a calculation reads the live
+ * world, so the world may not change while it runs.
  * <p>
  * Also writes focused samples of the geometry execution relies on: raytraces
  * ({@code Level.clip}), block centers, {@code RotationUtils.reachable} and
@@ -147,6 +183,7 @@ final class ExecRefGen {
     private ExecRefGen() {}
 
     static void write(String upstream, String minecraft, Path out) throws Exception {
+        installGate();
         JsonObject root = new JsonObject();
         root.addProperty("upstream", upstream);
         root.addProperty("minecraft", minecraft);
@@ -305,6 +342,37 @@ final class ExecRefGen {
             return List.of();
         }
 
+        /**
+         * The local player and the other entities, like the client's entity storage.
+         */
+        FakePlayer player;
+        List<Entity> entities = new ArrayList<>();
+
+        List<Entity> all() {
+            List<Entity> all = new ArrayList<>();
+            if (player != null) {
+                all.add(player);
+            }
+            all.addAll(entities);
+            return all;
+        }
+
+        @Override
+        public Iterable<Entity> entitiesForRendering() {
+            return all();
+        }
+
+        @Override
+        public List<Entity> getEntities(Entity except, AABB bb, Predicate<? super Entity> selector) {
+            List<Entity> out = new ArrayList<>();
+            for (Entity e : all()) {
+                if (e != except && e.getBoundingBox().intersects(bb) && selector.test(e)) {
+                    out.add(e);
+                }
+            }
+            return out;
+        }
+
         GameMode gameMode;
 
         @Override
@@ -323,9 +391,97 @@ final class ExecRefGen {
         BlockRefGen.setField(Level.class, level, "dimension", world.nether ? Level.NETHER : Level.OVERWORLD);
         FakeChunkCache chunks = BlockRefGen.allocate(FakeChunkCache.class);
         chunks.level = level;
-        chunks.cache = new HashMap<>();
+        // the world scanner reads chunks from a parallel stream
+        chunks.cache = new java.util.concurrent.ConcurrentHashMap<>();
         level.chunks = chunks;
         return level;
+    }
+
+    /**
+     * The chunk cache as the port keeps it: every region within 4096 blocks of the origin is in
+     * memory (so none waits for the disk), and a chunk is cached once it is marked by
+     * {@link Sim#cacheLoadedChunks}. A cached chunk's contents are never read: chunks stay
+     * loaded once they are.
+     */
+    static CachedWorld fakeCachedWorld(FakeLevel level) throws Exception {
+        CachedWorld cache = BlockRefGen.allocate(CachedWorld.class);
+        Long2ObjectOpenHashMap<CachedRegion> regions = new Long2ObjectOpenHashMap<>();
+        Method regionId = CachedWorld.class.getDeclaredMethod("getRegionID", int.class, int.class);
+        regionId.setAccessible(true);
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                CachedRegion region = BlockRefGen.allocate(CachedRegion.class);
+                BlockRefGen.setField(CachedRegion.class, region, "chunks", new CachedChunk[32][32]);
+                BlockRefGen.setField(CachedRegion.class, region, "dimension", level.dimensionType());
+                regions.put((long) regionId.invoke(cache, x, z), region);
+            }
+        }
+        BlockRefGen.setField(CachedWorld.class, cache, "cachedRegions", regions);
+        return cache;
+    }
+
+    /**
+     * Stands in for {@code Baritone.getExecutor()}'s pool: background work that processes
+     * start (rescans) waits in a queue until the tick that started it has run, then runs on
+     * the tick's thread, so it sees the world and the player of that tick and its results land
+     * before the next one. Path calculations run on the pool as usual.
+     */
+    static final class GatedExecutor extends ThreadPoolExecutor {
+        private final List<Runnable> gated = new ArrayList<>();
+
+        GatedExecutor() {
+            super(4, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<>());
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            boolean fromProcess = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                    .walk(frames -> frames.anyMatch(f -> f.getDeclaringClass().getPackageName().equals("baritone.process")));
+            if (!fromProcess) {
+                super.execute(command);
+                return;
+            }
+            synchronized (gated) {
+                gated.add(command);
+            }
+        }
+
+        /**
+         * Runs the queued work; a task that throws ends like it would on a pool thread.
+         */
+        void runGated() {
+            List<Runnable> tasks;
+            synchronized (gated) {
+                tasks = new ArrayList<>(gated);
+                gated.clear();
+            }
+            for (Runnable task : tasks) {
+                try {
+                    task.run();
+                } catch (RuntimeException e) {
+                    // an uncaught exception on a pool thread
+                }
+            }
+        }
+    }
+
+    static final GatedExecutor GATE = new GatedExecutor();
+
+    /**
+     * Replaces the pool behind {@code Baritone.getExecutor()} (a static final field) with
+     * {@link #GATE}.
+     */
+    @SuppressWarnings("removal")
+    static void installGate() throws Exception {
+        Baritone.getExecutor(); // initializes the class and its pool
+        Field pool = Baritone.class.getDeclaredField("threadPool");
+        Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        sun.misc.Unsafe unsafe = (sun.misc.Unsafe) theUnsafe.get(null);
+        unsafe.putObject(unsafe.staticFieldBase(pool), unsafe.staticFieldOffset(pool), GATE);
+        if (Baritone.getExecutor() != GATE) {
+            throw new IllegalStateException("the executor was not replaced");
+        }
     }
 
     static final class FakeChunkCache extends ClientChunkCache implements IClientChunkProvider {
@@ -446,6 +602,16 @@ final class ExecRefGen {
         }
 
         @Override
+        public boolean isSpectator() {
+            return false;
+        }
+
+        @Override
+        public boolean isAlive() {
+            return true;
+        }
+
+        @Override
         public boolean swing(InteractionHand hand, SwingAnimation animation, boolean sendToSwingingEntity) {
             gameMode.actions.add("swing " + hand(hand));
             return true;
@@ -492,6 +658,10 @@ final class ExecRefGen {
         BlockRefGen.setField(Player.class, player, "inventoryMenu", menu);
         player.containerMenu = menu;
         player.input = new ClientInput();
+        // entities are equal when their ids are; the scenarios' entities count from 1
+        player.setId(1000);
+        // as LivingEntity's constructor sets it
+        BlockRefGen.setField(Entity.class, player, "blocksBuilding", true);
         return player;
     }
 
@@ -571,6 +741,42 @@ final class ExecRefGen {
                 }
                 return InteractionResult.SUCCESS;
             }
+            // containers open, unless sneaking with something in hand
+            if (CONTAINERS.contains(clicked.getBlock()) && !(player.isCrouching() && !item.isEmpty())) {
+                try {
+                    // any menu but the inventory's
+                    player.containerMenu = BlockRefGen.allocate(CraftingMenu.class);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                return InteractionResult.SUCCESS;
+            }
+            // bone meal ages what has an age by 3, up to its maximum
+            if (item.is(Items.BONE_MEAL)) {
+                IntegerProperty age = age(clicked);
+                if (age == null) {
+                    return InteractionResult.PASS;
+                }
+                int max = Collections.max(age.getPossibleValues());
+                int now = clicked.getValue(age);
+                if (now >= max) {
+                    return InteractionResult.PASS;
+                }
+                pending.add(new Object[]{hit.getBlockPos(), clicked.setValue(age, Math.min(now + 3, max))});
+                shrink(inventory, selected, item);
+                return InteractionResult.SUCCESS;
+            }
+            // seeds and the like plant their crop against the clicked face, even inside the player
+            Block plant = PLANTS.get(item.getItem());
+            if (plant != null) {
+                BlockPos target = clicked.canBeReplaced() ? hit.getBlockPos() : hit.getBlockPos().relative(hit.getDirection());
+                if (!level.getBlockState(target).canBeReplaced()) {
+                    return InteractionResult.FAIL;
+                }
+                pending.add(new Object[]{target, plant.defaultBlockState()});
+                shrink(inventory, selected, item);
+                return InteractionResult.SUCCESS;
+            }
             Identifier id = BuiltInRegistries.ITEM.getKey(item.getItem());
             Optional<Block> block = BuiltInRegistries.BLOCK.getOptional(id);
             if (item.isEmpty() || block.isEmpty()) {
@@ -584,12 +790,41 @@ final class ExecRefGen {
                 return InteractionResult.FAIL;
             }
             pending.add(new Object[]{target, block.get().defaultBlockState()});
+            shrink(inventory, selected, item);
+            return InteractionResult.SUCCESS;
+        }
+
+        static void shrink(Inventory inventory, int selected, ItemStack item) {
             item.shrink(1);
             if (item.isEmpty()) {
                 inventory.setItem(selected, ItemStack.EMPTY);
             }
-            return InteractionResult.SUCCESS;
         }
+
+        /**
+         * The state's {@code age} property, if it has one.
+         */
+        static IntegerProperty age(BlockState state) {
+            for (Property<?> p : state.getProperties()) {
+                if (p.getName().equals("age") && p instanceof IntegerProperty age) {
+                    return age;
+                }
+            }
+            return null;
+        }
+
+        static final Set<Block> CONTAINERS = Set.of(Blocks.CRAFTING_TABLE, Blocks.FURNACE, Blocks.BLAST_FURNACE,
+                Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.ENDER_CHEST);
+
+        static final Map<net.minecraft.world.item.Item, Block> PLANTS = Map.of(
+                Items.WHEAT_SEEDS, Blocks.WHEAT,
+                Items.CARROT, Blocks.CARROTS,
+                Items.POTATO, Blocks.POTATOES,
+                Items.BEETROOT_SEEDS, Blocks.BEETROOTS,
+                Items.NETHER_WART, Blocks.NETHER_WART,
+                Items.COCOA_BEANS, Blocks.COCOA,
+                Items.MELON_SEEDS, Blocks.MELON_STEM,
+                Items.PUMPKIN_SEEDS, Blocks.PUMPKIN_STEM);
     }
 
     static String result(InteractionResult r) {
@@ -747,6 +982,13 @@ final class ExecRefGen {
         final InputOverrideHandler input;
         final List<String> events = new ArrayList<>();
         final Object planLock;
+        final PathingControlManager pcm;
+        final CachedWorld cache;
+        /**
+         * Chunks of the world's box within this many chunks of the player load after every
+         * tick; -1 for none.
+         */
+        int loadRadius = -1;
         boolean prevShift;
         int jumpDelay;
         float[] lastSent;
@@ -786,7 +1028,13 @@ final class ExecRefGen {
             BlockRefGen.setField(WorldProvider.class, worldProvider, "baritone", baritone);
             BlockRefGen.setField(WorldProvider.class, worldProvider, "ctx", ctx);
             BlockRefGen.setField(WorldProvider.class, worldProvider, "mcWorld", level);
+            // the port's cache: which chunks were loaded, every region in memory
+            cache = fakeCachedWorld(level);
+            WorldData worldData = BlockRefGen.allocate(WorldData.class);
+            BlockRefGen.setField(WorldData.class, worldData, "cache", cache);
+            BlockRefGen.setField(WorldProvider.class, worldProvider, "currentWorld", worldData);
             BlockRefGen.setField(Baritone.class, baritone, "worldProvider", worldProvider);
+            level.player = player;
             geh = new GameEventHandler(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "gameEventHandler", geh);
             // registration order: look, pathing, inventory, input override (, waypoints)
@@ -806,16 +1054,37 @@ final class ExecRefGen {
             geh.registerEventListener(input);
             PathingControlManager pcm = new PathingControlManager(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "pathingControlManager", pcm);
-            // the processes the port has, in upstream's registration order
+            // the processes the port has, in upstream's registration order; the builder and
+            // elytra processes are never active, and upstream asks the builder for
+            // placementPlausible
+            FollowProcess follow = new FollowProcess(baritone);
+            BlockRefGen.setField(Baritone.class, baritone, "followProcess", follow);
+            pcm.registerProcess(follow);
+            MineProcess mine = new MineProcess(baritone);
+            BlockRefGen.setField(Baritone.class, baritone, "mineProcess", mine);
+            pcm.registerProcess(mine);
             CustomGoalProcess customGoal = new CustomGoalProcess(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "customGoalProcess", customGoal);
             pcm.registerProcess(customGoal);
+            GetToBlockProcess getToBlock = new GetToBlockProcess(baritone);
+            BlockRefGen.setField(Baritone.class, baritone, "getToBlockProcess", getToBlock);
+            pcm.registerProcess(getToBlock);
+            BuilderProcess builder = BlockRefGen.allocate(BuilderProcess.class);
+            BlockRefGen.setField(BaritoneProcessHelper.class, builder, "baritone", baritone);
+            BlockRefGen.setField(BaritoneProcessHelper.class, builder, "ctx", ctx);
+            BlockRefGen.setField(Baritone.class, baritone, "builderProcess", builder);
+            ExploreProcess explore = new ExploreProcess(baritone);
+            BlockRefGen.setField(Baritone.class, baritone, "exploreProcess", explore);
+            pcm.registerProcess(explore);
+            FarmProcess farm = new FarmProcess(baritone);
+            BlockRefGen.setField(Baritone.class, baritone, "farmProcess", farm);
+            pcm.registerProcess(farm);
             InventoryPauserProcess pauser = new InventoryPauserProcess(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "inventoryPauserProcess", pauser);
             pcm.registerProcess(pauser);
-            // never active; upstream asks them
             BlockRefGen.setField(Baritone.class, baritone, "elytraProcess", new NullElytraProcess(baritone));
-            BlockRefGen.setField(Baritone.class, baritone, "builderProcess", BlockRefGen.allocate(BuilderProcess.class));
+            pcm.registerProcess(new BackfillProcess(baritone));
+            this.pcm = pcm;
             geh.registerEventListener(new AbstractGameEventListener() {
                 @Override
                 public void onPathEvent(PathEvent event) {
@@ -828,6 +1097,7 @@ final class ExecRefGen {
                     new Class<?>[]{IBaritoneProvider.class}, (proxy, method, args) -> switch (method.getName()) {
                         case "getPrimaryBaritone", "getBaritoneForPlayer" -> baritone;
                         case "getAllBaritones" -> List.<IBaritone>of(baritone);
+                        case "getWorldScanner" -> RefWorldScanner.INSTANCE;
                         default -> throw new UnsupportedOperationException("IBaritoneProvider." + method.getName());
                     });
         }
@@ -841,7 +1111,11 @@ final class ExecRefGen {
 
         JsonObject tick() throws Exception {
             synchronized (planLock) {
+                // ChunkEvent: every chunk loaded so far is cached
+                cacheLoadedChunks();
                 geh.onTick(new TickEvent(EventState.PRE, TickEvent.Type.IN, tick));
+                // the background work processes started during the tick
+                GATE.runGated();
                 playerTick();
             }
             // let a calculation started this tick finish and take effect
@@ -857,8 +1131,41 @@ final class ExecRefGen {
                 world.set(pos.getX(), pos.getY(), pos.getZ(), (BlockState) change[1]);
             }
             gm.pending.clear();
+            loadChunks();
             tick++;
             return record();
+        }
+
+        /**
+         * Loads the chunks of the world's box within {@link #loadRadius} of the player's chunk.
+         */
+        void loadChunks() {
+            if (loadRadius < 0) {
+                return;
+            }
+            BlockPos feet = player.blockPosition();
+            int cx = feet.getX() >> 4;
+            int cz = feet.getZ() >> 4;
+            for (int x = cx - loadRadius; x <= cx + loadRadius; x++) {
+                for (int z = cz - loadRadius; z <= cz + loadRadius; z++) {
+                    if (x >= world.x0 >> 4 && x <= (world.x0 + world.sx - 1) >> 4
+                            && z >= world.z0 >> 4 && z <= (world.z0 + world.sz - 1) >> 4) {
+                        world.loaded.add(ChunkPos.pack(x, z));
+                    }
+                }
+            }
+        }
+
+        void cacheLoadedChunks() throws Exception {
+            for (long key : world.loaded) {
+                int x = ChunkPos.getX(key);
+                int z = ChunkPos.getZ(key);
+                CachedRegion region = cache.getRegion(x >> 5, z >> 5);
+                CachedChunk[][] chunks = (CachedChunk[][]) BlockRefGen.getField(CachedRegion.class, region, "chunks");
+                if (chunks[x & 31][z & 31] == null) {
+                    chunks[x & 31][z & 31] = BlockRefGen.allocate(CachedChunk.class);
+                }
+            }
         }
 
         static final float WIDTH = 0.6F;
@@ -948,6 +1255,32 @@ final class ExecRefGen {
                 out[axis] = m;
             }
             return new Vec3(out[0], out[1], out[2]);
+        }
+
+        /**
+         * The player's step height ({@code Attributes.STEP_HEIGHT}).
+         */
+        static final double STEP = 0.6;
+
+        /**
+         * Entity.collide with stepping up: a move on the ground that runs into something at
+         * most {@link #STEP} high goes up, across and back down instead, if that gets further.
+         */
+        Vec3 collideAndStep(AABB bb, Vec3 delta, boolean onGround) {
+            Vec3 movement = collide(bb, delta);
+            boolean horizontal = movement.x != delta.x || movement.z != delta.z;
+            boolean onGroundAfter = onGround || (movement.y != delta.y && delta.y < 0.0);
+            if (onGroundAfter && horizontal) {
+                double up = collide(bb, new Vec3(0.0, STEP, 0.0)).y;
+                AABB raised = bb.move(0.0, up, 0.0);
+                Vec3 across = collide(raised, new Vec3(delta.x, 0.0, delta.z));
+                Vec3 down = collide(raised.move(across.x, 0.0, across.z), new Vec3(0.0, movement.y - up, 0.0));
+                Vec3 stepped = new Vec3(across.x, up + down.y, across.z);
+                if (stepped.x * stepped.x + stepped.z * stepped.z > movement.x * movement.x + movement.z * movement.z) {
+                    return stepped;
+                }
+            }
+            return movement;
         }
 
         boolean canFallAtLeast(AABB bb, double dx, double dz, double minHeight) {
@@ -1099,7 +1432,7 @@ final class ExecRefGen {
             if (crouching && onGround && delta.y <= 0.0) {
                 delta = backOffFromEdge(bb, delta);
             }
-            Vec3 movement = collide(bb, delta);
+            Vec3 movement = collideAndStep(bb, delta, onGround);
             boolean xCollision = movement.x != delta.x;
             boolean yCollision = movement.y != delta.y;
             boolean zCollision = movement.z != delta.z;
@@ -1185,6 +1518,11 @@ final class ExecRefGen {
                     r.addProperty("movement", current.getPath().movements().get(position).getClass().getSimpleName());
                 }
             }
+            PathingCommand command = pcm.mostRecentCommand().orElse(null);
+            if (command != null) {
+                r.addProperty("command", command.commandType.name() + " " + command.goal);
+            }
+            pcm.mostRecentInControl().ifPresent(p -> r.addProperty("in_control", p.getClass().getSimpleName()));
             return r;
         }
 
@@ -1203,6 +1541,125 @@ final class ExecRefGen {
             BlockRefGen.setField(Entity.class, player, "bb", playerBox(position, player.isCrouching()));
             BlockRefGen.setField(Entity.class, player, "deltaMovement", Vec3.ZERO);
         }
+
+        /**
+         * Replaces the other entities between ticks.
+         */
+        void setEntities(List<EntitySpec> entities) throws ReflectiveOperationException {
+            level.entities = new ArrayList<>();
+            for (EntitySpec e : entities) {
+                level.entities.add(e.create(level));
+            }
+        }
+    }
+
+    /**
+     * {@code FasterWorldScanner} (what upstream's provider hands out), copied, because it reads
+     * sections through mixin accessors ({@code IPalettedContainer}) that the stand-in sections
+     * lack. The stand-in sections have no palette. They are never single-valued (and neither
+     * are the sections of the worlds the port replays, which are filled block by block), so
+     * every section with a block is scanned in storage order (y, z, x), and a section of only
+     * air is skipped ({@code hasOnlyAir()}).
+     */
+    static final class RefWorldScanner implements IWorldScanner {
+        static final RefWorldScanner INSTANCE = new RefWorldScanner();
+
+        @Override
+        public List<BlockPos> scanChunkRadius(IPlayerContext ctx, BlockOptionalMetaLookup filter, int max, int yLevelThreshold, int maxSearchRadius) {
+            if (maxSearchRadius < 0) {
+                throw new IllegalArgumentException("chunkRange must be >= 0");
+            }
+            return scanChunksInternal(ctx, filter, FasterWorldScanner.getChunkRange(ctx.playerFeet().x >> 4, ctx.playerFeet().z >> 4, maxSearchRadius), max);
+        }
+
+        @Override
+        public List<BlockPos> scanChunk(IPlayerContext ctx, BlockOptionalMetaLookup filter, ChunkPos pos, int max, int yLevelThreshold) {
+            Stream<BlockPos> stream = scanChunkInternal(ctx, filter, pos);
+            if (max >= 0) {
+                stream = stream.limit(max);
+            }
+            return stream.collect(Collectors.toList());
+        }
+
+        @Override
+        public int repack(IPlayerContext ctx) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int repack(IPlayerContext ctx, int range) {
+            throw new UnsupportedOperationException();
+        }
+
+        private List<BlockPos> scanChunksInternal(IPlayerContext ctx, BlockOptionalMetaLookup lookup, List<ChunkPos> chunkPositions, int maxBlocks) {
+            Stream<BlockPos> posStream = chunkPositions.parallelStream().flatMap(p -> scanChunkInternal(ctx, lookup, p));
+            if (maxBlocks >= 0) {
+                posStream = posStream.limit(maxBlocks);
+            }
+            return posStream.collect(Collectors.toList());
+        }
+
+        private Stream<BlockPos> scanChunkInternal(IPlayerContext ctx, BlockOptionalMetaLookup lookup, ChunkPos pos) {
+            ChunkSource chunkProvider = ctx.world().getChunkSource();
+            // if chunk is not loaded, return empty stream
+            if (!chunkProvider.hasChunk(pos.x(), pos.z())) {
+                return Stream.empty();
+            }
+
+            long chunkX = (long) pos.x() << 4;
+            long chunkZ = (long) pos.z() << 4;
+
+            int playerSectionY = (ctx.playerFeet().y - ctx.world().getMinY()) >> 4;
+
+            // chunk.getMinY() asks the chunk's height accessor, which the stand-in chunks lack
+            return collectChunkSections(lookup, chunkProvider.getChunk(pos.x(), pos.z(), false), ctx.world().getMinY(), chunkX, chunkZ, playerSectionY).stream();
+        }
+
+        private List<BlockPos> collectChunkSections(BlockOptionalMetaLookup lookup, LevelChunk chunk, int chunkY, long chunkX, long chunkZ, int playerSection) {
+            // iterate over sections relative to player
+            List<BlockPos> blocks = new ArrayList<>();
+            LevelChunkSection[] sections = chunk.getSections();
+            int l = sections.length;
+            int i = playerSection - 1;
+            int j = playerSection;
+            for (; i >= 0 || j < l; ++j, --i) {
+                if (j < l) {
+                    visitSection(lookup, sections[j], blocks, chunkX, chunkY + j * 16, chunkZ);
+                }
+                if (i >= 0) {
+                    visitSection(lookup, sections[i], blocks, chunkX, chunkY + i * 16, chunkZ);
+                }
+            }
+            return blocks;
+        }
+
+        private void visitSection(BlockOptionalMetaLookup lookup, LevelChunkSection section, List<BlockPos> blocks, long chunkX, int sectionY, long chunkZ) {
+            if (section == null || onlyAir(section)) {
+                return;
+            }
+            for (int idx = 0; idx < 4096; idx++) {
+                if (lookup.has(section.getBlockState(idx & 15, idx >> 8, (idx & 255) >> 4))) {
+                    blocks.add(new BlockPos(
+                            (int) chunkX + ((idx & 255) & 15),
+                            sectionY + (idx >> 8),
+                            (int) chunkZ + ((idx & 255) >> 4)
+                    ));
+                }
+            }
+        }
+
+        private static boolean onlyAir(LevelChunkSection section) {
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        if (!section.getBlockState(x, y, z).isAir()) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
     }
 
     static JsonArray bits(Vec3 v) {
@@ -1217,25 +1674,171 @@ final class ExecRefGen {
 
     // region scenarios
 
-    record Scenario(String name, ExecWorld world, Vec3 start, BlockPos goal, ItemStack[] items, int selected,
-                    JsonObject config, int ticks, List<Event> events) {
+    /**
+     * A scenario: the player starts at {@code start} with {@code items} in {@code world}, and
+     * a process starts: the custom goal process to {@code goal}, unless {@link #process} says
+     * which process to start how (see {@link #start}).
+     */
+    static final class Scenario {
+        final String name;
+        final ExecWorld world;
+        final Vec3 start;
+        final BlockPos goal;
+        final ItemStack[] items;
+        final int selected;
+        final JsonObject config;
+        final int ticks;
+        final List<Event> events;
+        JsonObject process;
+        List<EntitySpec> entities = List.of();
+        int loadRadius = -1;
+
+        Scenario(String name, ExecWorld world, Vec3 start, BlockPos goal, ItemStack[] items, int selected,
+                 JsonObject config, int ticks, List<Event> events) {
+            this.name = name;
+            this.world = world;
+            this.start = start;
+            this.goal = goal;
+            this.items = items;
+            this.selected = selected;
+            this.config = config;
+            this.ticks = ticks;
+            this.events = events;
+        }
+
         Scenario(String name, ExecWorld world, Vec3 start, BlockPos goal, ItemStack[] items, int selected,
                  JsonObject config, int ticks) {
             this(name, world, start, goal, items, selected, config, ticks, List.of());
         }
+
+        Scenario process(Object... kv) {
+            JsonObject p = new JsonObject();
+            for (int i = 0; i < kv.length; i += 2) {
+                Object v = kv[i + 1];
+                if (v instanceof String s) {
+                    p.addProperty((String) kv[i], s);
+                } else if (v instanceof Number n) {
+                    p.addProperty((String) kv[i], n);
+                } else if (v instanceof String[] a) {
+                    JsonArray array = new JsonArray();
+                    for (String s : a) {
+                        array.add(s);
+                    }
+                    p.add((String) kv[i], array);
+                } else {
+                    throw new IllegalArgumentException(String.valueOf(v));
+                }
+            }
+            this.process = p;
+            return this;
+        }
+
+        Scenario entities(EntitySpec... entities) {
+            this.entities = List.of(entities);
+            return this;
+        }
+
+        Scenario loadRadius(int loadRadius) {
+            this.loadRadius = loadRadius;
+            return this;
+        }
+    }
+
+    /**
+     * Starts the scenario's process. The process JSON has a {@code type}: {@code mine}
+     * ({@code quantity}, {@code blocks}: selectors), {@code get_to_block} ({@code block}: a
+     * selector), {@code follow} ({@code entity_type}), {@code pickup} ({@code item}),
+     * {@code explore} ({@code x}, {@code z}) or {@code farm} ({@code range}).
+     */
+    static void start(Sim sim, Scenario s) {
+        if (s.process == null) {
+            sim.baritone.getCustomGoalProcess().setGoalAndPath(new GoalBlock(s.goal));
+            return;
+        }
+        JsonObject p = s.process;
+        switch (p.get("type").getAsString()) {
+            case "mine" -> {
+                List<String> blocks = new ArrayList<>();
+                p.getAsJsonArray("blocks").forEach(b -> blocks.add(b.getAsString()));
+                sim.baritone.getMineProcess().mineByName(p.get("quantity").getAsInt(), blocks.toArray(new String[0]));
+            }
+            case "get_to_block" -> sim.baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(p.get("block").getAsString()));
+            case "follow" -> {
+                String type = p.get("entity_type").getAsString();
+                sim.baritone.getFollowProcess().follow(e -> BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString().equals(type));
+            }
+            case "pickup" -> {
+                net.minecraft.world.item.Item item = BuiltInRegistries.ITEM.getValue(Identifier.parse(p.get("item").getAsString()));
+                sim.baritone.getFollowProcess().pickup(stack -> stack.is(item));
+            }
+            case "explore" -> sim.baritone.getExploreProcess().explore(p.get("x").getAsInt(), p.get("z").getAsInt());
+            case "farm" -> sim.baritone.getFarmProcess().farm(p.get("range").getAsInt(), null);
+            default -> throw new IllegalArgumentException(p.toString());
+        }
+    }
+
+    /**
+     * An item entity: {@code item} lying at {@code position}.
+     */
+    record EntitySpec(int id, Vec3 position, boolean onGround, ItemStack item) {
+        /**
+         * As the port's {@code host::Entity}.
+         */
+        JsonObject json() {
+            JsonObject o = new JsonObject();
+            o.addProperty("id", id);
+            o.addProperty("type_id", "minecraft:item");
+            JsonArray pos = new JsonArray();
+            pos.add(position.x);
+            pos.add(position.y);
+            pos.add(position.z);
+            o.add("position", pos);
+            AABB bb = EntityTypes.ITEM.getDimensions().makeBoundingBox(position);
+            JsonArray box = new JsonArray();
+            for (double d : new double[]{bb.minX, bb.minY, bb.minZ, bb.maxX, bb.maxY, bb.maxZ}) {
+                box.add(d);
+            }
+            o.add("bounding_box", box);
+            o.addProperty("on_ground", onGround);
+            o.addProperty("alive", true);
+            o.addProperty("blocks_building", false);
+            o.add("item", PathRefGen.itemJson(item));
+            return o;
+        }
+
+        ItemEntity create(FakeLevel level) throws ReflectiveOperationException {
+            ItemEntity e = new ItemEntity(EntityTypes.ITEM, level);
+            e.setId(id);
+            e.setPos(position.x, position.y, position.z);
+            e.setItem(item.copy());
+            // setOnGround looks for the supporting block through the chunks
+            BlockRefGen.setField(Entity.class, e, "onGround", onGround);
+            return e;
+        }
+    }
+
+    static JsonArray entitiesJson(List<EntitySpec> entities) {
+        JsonArray a = new JsonArray();
+        entities.forEach(e -> a.add(e.json()));
+        return a;
     }
 
     /**
      * Something that happens after tick {@code tick}: a box of blocks changes ({@code state}
-     * from {@code a} to {@code b}), or the player is moved to {@code teleport}.
+     * from {@code a} to {@code b}), the player is moved to {@code teleport}, or the other
+     * entities become {@code entities}.
      */
-    record Event(int tick, BlockPos a, BlockPos b, BlockState state, Vec3 teleport) {
+    record Event(int tick, BlockPos a, BlockPos b, BlockState state, Vec3 teleport, List<EntitySpec> entities) {
         static Event fill(int tick, BlockPos a, BlockPos b, BlockState state) {
-            return new Event(tick, a, b, state, null);
+            return new Event(tick, a, b, state, null, null);
         }
 
         static Event teleport(int tick, Vec3 to) {
-            return new Event(tick, null, null, null, to);
+            return new Event(tick, null, null, null, to, null);
+        }
+
+        static Event entities(int tick, EntitySpec... entities) {
+            return new Event(tick, null, null, null, null, List.of(entities));
         }
 
         JsonObject json() {
@@ -1243,6 +1846,8 @@ final class ExecRefGen {
             o.addProperty("tick", tick);
             if (teleport != null) {
                 o.add("teleport", bits(teleport));
+            } else if (entities != null) {
+                o.add("entities", entitiesJson(entities));
             } else {
                 o.add("from", blockPos(a));
                 o.add("to", blockPos(b));
@@ -1254,6 +1859,10 @@ final class ExecRefGen {
         void apply(Sim sim) throws ReflectiveOperationException {
             if (teleport != null) {
                 sim.teleport(teleport);
+                return;
+            }
+            if (entities != null) {
+                sim.setEntities(entities);
                 return;
             }
             for (int x = Math.min(a.getX(), b.getX()); x <= Math.max(a.getX(), b.getX()); x++) {
@@ -1553,6 +2162,171 @@ final class ExecRefGen {
             JsonObject c = i % 2 == 0 ? none : config("allowDiagonalDescend", true, "allowParkour", true, "sprintAscends", i % 3 == 0);
             list.add(new Scenario("terrain_" + i, t, s, new BlockPos(gx, surface(t, gx, gz), gz), basicItems(), 0, c, 600));
         }
+
+        list.addAll(processScenarios());
+        return list;
+    }
+
+    /**
+     * Timeouts long enough that every calculation ends by finding its goal or running out of
+     * nodes: processes path toward goals that cannot be reached (running away, exploring).
+     * No planning ahead: when a process changes its goal, the pathing control manager cancels
+     * the calculation of the next segment, which then ends as cancelled or, if it finished
+     * first, as failed, a race between threads that neither side can pin down. Dropped items
+     * are not scanned for: upstream matches item stacks through a mixin ({@code IItemStack})
+     * the stand-in items lack, and its anticipated drops expire by the wall clock.
+     */
+    static JsonObject processConfig(Object... kv) {
+        JsonObject c = config("primaryTimeoutMS", 60000, "failureTimeoutMS", 60000,
+                "planAheadPrimaryTimeoutMS", 60000, "planAheadFailureTimeoutMS", 60000,
+                "planningTickLookahead", 0, "mineScanDroppedItems", false);
+        JsonObject extra = config(kv);
+        for (String key : extra.keySet()) {
+            c.add(key, extra.get(key));
+        }
+        return c;
+    }
+
+    /**
+     * A bedrock floor at y = 0 over x and z in [x0, x0 + size): nothing to dig, so a search
+     * that cannot reach its goal soon runs out of nodes.
+     */
+    static ExecWorld platform(int x0, int size) {
+        ExecWorld w = new ExecWorld(x0, x0, size, size, -16, 64);
+        w.fill(x0, 0, x0, x0 + size - 1, 0, x0 + size - 1, Blocks.BEDROCK.defaultBlockState());
+        return w;
+    }
+
+    static EntitySpec item(int id, double x, double y, double z, net.minecraft.world.item.Item item) {
+        return new EntitySpec(id, new Vec3(x, y, z), true, stack(item, 1));
+    }
+
+    static List<Scenario> processScenarios() {
+        List<Scenario> list = new ArrayList<>();
+        Vec3 start = new Vec3(0.5, 1.0, 0.5);
+        ItemStack[] axe = basicItems();
+        axe[2] = stack(Items.IRON_AXE, 1);
+        // no blocks to place: searches stay on the ground
+        ItemStack[] pickaxe = new ItemStack[36];
+        java.util.Arrays.fill(pickaxe, ItemStack.EMPTY);
+        pickaxe[0] = stack(Items.STONE_PICKAXE, 1);
+        String[] oakLog = {"oak_log"};
+        String[] coalOre = {"coal_ore"};
+
+        // logs around: above the start (mined from below, the shaft), a pair, a trunk and a
+        // floating one; the process stops when none are left
+        ExecWorld logs = flat();
+        logs.set(0, 3, 0, Blocks.OAK_LOG.defaultBlockState());
+        logs.set(5, 1, 3, Blocks.OAK_LOG.defaultBlockState());
+        logs.set(6, 1, 3, Blocks.OAK_LOG.defaultBlockState());
+        logs.fill(-4, 1, -6, -4, 3, -6, Blocks.OAK_LOG.defaultBlockState());
+        logs.set(10, 3, 2, Blocks.OAK_LOG.defaultBlockState());
+        list.add(new Scenario("mine_logs", logs, start, null, axe, 0,
+                processConfig("exploreForBlocks", false), 700)
+                .process("type", "mine", "quantity", 0, "blocks", oakLog));
+
+        // coal ore buried in the stone, in the surface, and just under it
+        ExecWorld ores = flat();
+        ores.set(3, -3, 0, Blocks.COAL_ORE.defaultBlockState());
+        ores.set(6, 0, 4, Blocks.COAL_ORE.defaultBlockState());
+        ores.set(-5, -1, -2, Blocks.COAL_ORE.defaultBlockState());
+        ores.set(-5, -2, -2, Blocks.COAL_ORE.defaultBlockState());
+        list.add(new Scenario("mine_ores", ores.copy(), start, null, basicItems(), 0,
+                processConfig("exploreForBlocks", false), 700)
+                .process("type", "mine", "quantity", 0, "blocks", coalOre));
+        list.add(new Scenario("mine_exposed", ores.copy(), start, null, basicItems(), 0,
+                processConfig("exploreForBlocks", false, "allowOnlyExposedOres", true, "forceInternalMining", false), 400)
+                .process("type", "mine", "quantity", 0, "blocks", coalOre));
+        list.add(new Scenario("mine_legit", ores, start, null, basicItems(), 0,
+                processConfig("legitMine", true), 300)
+                .process("type", "mine", "quantity", 0, "blocks", coalOre));
+
+        // locked in a bedrock room with the logs outside: every search fails, the closest log
+        // is blacklisted, then the other, then there is nothing left
+        ExecWorld room = flat();
+        room.fill(-3, 0, -3, 3, 4, 3, Blocks.BEDROCK.defaultBlockState());
+        room.fill(-2, 1, -2, 2, 3, 2, AIR);
+        room.set(8, 1, 0, Blocks.OAK_LOG.defaultBlockState());
+        room.set(-9, 1, 4, Blocks.OAK_LOG.defaultBlockState());
+        list.add(new Scenario("mine_blacklist", room, start, null, axe, 0, processConfig(), 150)
+                .process("type", "mine", "quantity", 0, "blocks", oakLog));
+
+        // nothing to mine: go away from the branch point, at legitMineYLevel
+        list.add(new Scenario("mine_explore", platform(-24, 48), start, null, pickaxe, 0, processConfig(), 150)
+                .process("type", "mine", "quantity", 0, "blocks", oakLog));
+
+        // get to a crafting table and open it
+        ExecWorld table = flat();
+        table.set(8, 1, 5, Blocks.CRAFTING_TABLE.defaultBlockState());
+        list.add(new Scenario("get_to_crafting_table", table, start, null, basicItems(), 0, processConfig(), 250)
+                .process("type", "get_to_block", "block", "crafting_table"));
+        ExecWorld gold = flat();
+        gold.set(-7, 1, 9, Blocks.GOLD_BLOCK.defaultBlockState());
+        gold.set(12, 1, -3, Blocks.GOLD_BLOCK.defaultBlockState());
+        list.add(new Scenario("get_to_gold", gold, start, null, basicItems(), 0, processConfig(), 250)
+                .process("type", "get_to_block", "block", "gold_block"));
+        // none known: run away from the start
+        list.add(new Scenario("get_to_missing", platform(-24, 48), start, null, pickaxe, 0, processConfig(), 150)
+                .process("type", "get_to_block", "block", "diamond_block"));
+
+        // follow an item around, then it is gone
+        EntitySpec stick = item(1, 6.5, 1.0, 0.5, Items.STICK);
+        list.add(new Scenario("follow", flat(), start, null, basicItems(), 0, processConfig(), 320,
+                List.of(Event.entities(60, item(1, 12.5, 1.0, 5.5, Items.STICK)),
+                        Event.entities(150, item(1, 4.5, 1.0, 12.5, Items.STICK)),
+                        Event.entities(250)))
+                .process("type", "follow", "entity_type", "minecraft:item")
+                .entities(stick));
+        list.add(new Scenario("follow_offset", flat(), start, null, basicItems(), 0,
+                processConfig("followOffsetDistance", 3.0, "followOffsetDirection", 90.0, "followRadius", 1), 200)
+                .process("type", "follow", "entity_type", "minecraft:item")
+                .entities(item(7, -8.5, 1.0, 6.25, Items.STICK)));
+        // pick up the wheat, not the stick; then the wheat is picked up
+        list.add(new Scenario("pickup", flat(), start, null, basicItems(), 0, processConfig(), 200,
+                List.of(Event.entities(120, item(3, -6.5, 1.0, -4.5, Items.STICK))))
+                .process("type", "pickup", "item", "minecraft:wheat")
+                .entities(item(2, 5.5, 1.0, 2.25, Items.WHEAT), item(3, -6.5, 1.0, -4.5, Items.STICK)));
+
+        // explore: chunks load around the player as it goes
+        ExecWorld explore = platform(-80, 160);
+        explore.loaded.clear();
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                explore.loaded.add(ChunkPos.pack(x, z));
+            }
+        }
+        list.add(new Scenario("explore", explore, start, null, pickaxe, 0, processConfig(), 500)
+                .process("type", "explore", "x", 0, "z", 0)
+                .loadRadius(2));
+
+        // farm: ripe and unripe crops, open farmland, a jungle log for cocoa, sugar cane and an
+        // item to pick up
+        ExecWorld farm = flat();
+        for (int x = 2; x <= 5; x++) {
+            farm.set(x, 0, 2, Blocks.FARMLAND.defaultBlockState());
+            farm.set(x, 0, 3, Blocks.FARMLAND.defaultBlockState());
+        }
+        farm.set(2, 1, 2, Blocks.WHEAT.defaultBlockState().setValue(CropBlock.AGE, 7));
+        farm.set(3, 1, 2, Blocks.WHEAT.defaultBlockState().setValue(CropBlock.AGE, 2));
+        farm.set(4, 1, 2, Blocks.CARROTS.defaultBlockState().setValue(CropBlock.AGE, 7));
+        farm.set(2, 1, 3, Blocks.BEETROOTS.defaultBlockState().setValue(BeetrootBlock.AGE, 3));
+        farm.set(-4, 1, 4, Blocks.JUNGLE_LOG.defaultBlockState());
+        farm.set(-2, 0, -4, Blocks.SAND.defaultBlockState());
+        farm.set(-2, 1, -4, Blocks.SUGAR_CANE.defaultBlockState());
+        farm.set(-2, 2, -4, Blocks.SUGAR_CANE.defaultBlockState());
+        ItemStack[] farming = basicItems();
+        farming[2] = stack(Items.WHEAT_SEEDS, 8);
+        farming[3] = stack(Items.BONE_MEAL, 8);
+        farming[4] = stack(Items.COCOA_BEANS, 4);
+        list.add(new Scenario("farm", farm, start, null, farming, 0, processConfig(), 600)
+                .process("type", "farm", "range", 0)
+                .entities(item(4, -5.5, 1.0, -1.5, Items.WHEAT)));
+
+        // backfill: the wall dug through is filled in again behind the player
+        ExecWorld wall = flat();
+        wall.fill(5, 1, -48, 5, 4, 47, Blocks.STONE.defaultBlockState());
+        list.add(new Scenario("backfill", wall, start, new BlockPos(9, 1, 0), basicItems(), 0,
+                processConfig("backfill", true), 400));
         return list;
     }
 
@@ -1572,11 +2346,9 @@ final class ExecRefGen {
             o.addProperty("name", s.name);
             o.add("world", s.world.json());
             o.add("start", bits(s.start));
-            JsonArray goal = new JsonArray();
-            goal.add(s.goal.getX());
-            goal.add(s.goal.getY());
-            goal.add(s.goal.getZ());
-            o.add("goal", goal);
+            if (s.goal != null) {
+                o.add("goal", blockPos(s.goal));
+            }
             JsonArray items = new JsonArray();
             for (ItemStack item : s.items) {
                 items.add(PathRefGen.itemJson(item));
@@ -1592,11 +2364,20 @@ final class ExecRefGen {
                 events.add(e.json());
             }
             o.add("events", events);
+            if (s.process != null) {
+                o.add("process", s.process);
+            }
+            o.add("entities", entitiesJson(s.entities));
+            if (s.loadRadius >= 0) {
+                o.addProperty("load_radius", s.loadRadius);
+            }
 
             BlockRefGen.apply(s.config);
             ExecWorld world = s.world.copy();
             Sim sim = new Sim(world, s.start, s.items, s.selected, seed);
-            sim.baritone.getCustomGoalProcess().setGoalAndPath(new GoalBlock(s.goal));
+            sim.loadRadius = s.loadRadius;
+            sim.setEntities(s.entities);
+            start(sim, s);
             JsonArray ticks = new JsonArray();
             for (int t = 0; t < s.ticks; t++) {
                 ticks.add(sim.tick());
