@@ -211,10 +211,12 @@ impl World {
     }
 
     /// The block state table the ids in this world refer to.
+    #[inline]
     pub fn table(&self) -> &Arc<BlockStateTable> {
         &self.table
     }
 
+    #[inline]
     pub fn dimension(&self) -> DimensionType {
         self.dimension
     }

@@ -55,7 +55,9 @@ impl std::error::Error for StorageError {}
 pub struct PalettedStorage {
     /// 0 (single value, no words), 1, 2, 4, 8 or 16.
     bits: u8,
+    /// Exactly `SECTION_VOLUME * bits` bits. Lookups rely on this.
     words: Box<[u64]>,
+    /// Never empty, and every entry in `words` indexes it. Lookups rely on this.
     palette: Vec<u32>,
 }
 
@@ -126,7 +128,9 @@ impl PalettedStorage {
     /// The host state id at `index`.
     #[inline]
     pub fn get(&self, index: usize) -> u32 {
-        self.palette[self.read(index) as usize]
+        let value = self.read(index) as usize;
+        // SAFETY: every entry indexes the palette (see the field), and 0 does as well.
+        unsafe { *self.palette.get_unchecked(value) }
     }
 
     /// Sets the entry at `index`, growing the palette and the entry width as needed. The
@@ -170,9 +174,12 @@ impl PalettedStorage {
         if self.bits == 0 {
             return 0;
         }
+        debug_assert!(index < SECTION_VOLUME);
         let bits = self.bits as usize;
-        let bit = index * bits;
-        ((self.words[bit >> 6] >> (bit & 63)) & ((1 << bits) - 1)) as u32
+        let bit = (index & (SECTION_VOLUME - 1)) * bits;
+        // SAFETY: `bit` is below `SECTION_VOLUME * bits`, the bits `words` holds.
+        let word = unsafe { *self.words.get_unchecked(bit >> 6) };
+        ((word >> (bit & 63)) & ((1 << bits) - 1)) as u32
     }
 
     #[inline]

@@ -11,11 +11,11 @@
 // settings throughout, where upstream would see a change made while it runs.
 
 use std::cell::Cell;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
-use crate::host::{BlockState, BlockStateTable, Chunk, World};
+use crate::host::{BlockState, BlockStateTable, Chunk, SubChunk, World};
 use crate::settings::{Settings, settings, settings_snapshot};
 use crate::utils::pathing::BetterWorldBorder;
 
@@ -27,14 +27,34 @@ pub struct BlockStateInterface {
     pub world_border: BetterWorldBorder,
     /// Chunk X, chunk Z and the chunk of the last lookup. The chunk is owned by `world`.
     prev: Cell<Option<(i32, i32, NonNull<Chunk>)>>,
+    /// The section of the last lookup, in a loaded chunk and inside the world.
+    prev_section: Cell<PrevSection>,
     use_the_real_world: bool,
     settings: Arc<Settings>,
 }
 
-// SAFETY: `prev` only points into chunks owned by `self.world`, an immutable snapshot that
-// lives as long as `self` (a `World` behind a shared `Arc` is never mutated: `Arc::make_mut`
-// clones it). `Chunk` is `Send + Sync`, so moving the pointer with `self` is sound; `Cell`
-// keeps the type `!Sync`.
+/// Section coordinates (Y counted from the bottom of the world) and the section, owned by the
+/// interface's `world`; null for an empty section.
+#[derive(Clone, Copy)]
+struct PrevSection {
+    x: i32,
+    y: i32,
+    z: i32,
+    section: *const SubChunk,
+}
+
+/// No section yet: `i32::MIN` is below any block coordinate `>> 4`.
+const NO_SECTION: PrevSection = PrevSection {
+    x: i32::MIN,
+    y: i32::MIN,
+    z: i32::MIN,
+    section: ptr::null(),
+};
+
+// SAFETY: `prev` and `prev_section` only point into chunks owned by `self.world`, an immutable
+// snapshot that lives as long as `self` (a `World` behind a shared `Arc` is never mutated:
+// `Arc::make_mut` clones it). `Chunk` and `SubChunk` are `Send + Sync`, so moving the pointers
+// with `self` is sound; `Cell` keeps the type `!Sync`.
 unsafe impl Send for BlockStateInterface {}
 
 impl Clone for BlockStateInterface {
@@ -44,6 +64,7 @@ impl Clone for BlockStateInterface {
             world: Arc::clone(&self.world),
             world_border: self.world_border,
             prev: Cell::new(None),
+            prev_section: Cell::new(NO_SECTION),
             use_the_real_world: self.use_the_real_world,
             settings: Arc::clone(&self.settings),
         }
@@ -58,6 +79,7 @@ impl BlockStateInterface {
             world_border: BetterWorldBorder::new(&world.border()),
             world,
             prev: Cell::new(None),
+            prev_section: Cell::new(NO_SECTION),
             use_the_real_world: !settings.path_through_cached_only,
             settings,
         }
@@ -114,10 +136,24 @@ impl BlockStateInterface {
         self.get0(pos.x, pos.y, pos.z)
     }
 
+    #[inline]
     pub fn get0(&self, x: i32, y: i32, z: i32) -> &BlockState {
         // Mickey resigned
         let dimension = self.world.dimension();
         let y = y.wrapping_sub(dimension.min_y);
+        // Not in upstream: the same section as last time is inside the world and loaded, so
+        // it skips the checks and the chunk below
+        let prev = self.prev_section.get();
+        if prev.x == x >> 4 && prev.y == y >> 4 && prev.z == z >> 4 {
+            return self.get_from_section(prev.section, x, y, z);
+        }
+        self.get0_other_section(x, y, z)
+    }
+
+    /// [`Self::get0`] outside the last section; `y` is relative to the bottom of the world.
+    #[inline(never)]
+    fn get0_other_section(&self, x: i32, y: i32, z: i32) -> &BlockState {
+        let dimension = self.world.dimension();
         // Invalid vertical position
         if y < 0 || y >= dimension.height {
             return self.table().air();
@@ -130,21 +166,43 @@ impl BlockStateInterface {
             // we can just skip the mc.world.getChunk lookup
             // which is a Long2ObjectOpenHashMap.get
             // see issue #113
-            if let Some((chunk_x, chunk_z, cached)) = self.prev.get()
+            let chunk = if let Some((chunk_x, chunk_z, cached)) = self.prev.get()
                 && chunk_x == x >> 4
                 && chunk_z == z >> 4
             {
                 // SAFETY: see `unsafe impl Send`; the chunk lives as long as `self.world`.
-                return self.get_from_chunk(unsafe { cached.as_ref() }, x, y, z);
-            }
-            if let Some(chunk) = self.world.get_chunk(x >> 4, z >> 4) {
+                unsafe { cached.as_ref() }
+            } else if let Some(chunk) = self.world.get_chunk(x >> 4, z >> 4) {
                 self.prev
                     .set(Some((x >> 4, z >> 4, NonNull::from(&**chunk))));
-                return self.get_from_chunk(chunk, x, y, z);
-            }
+                chunk
+            } else {
+                // upstream falls back to the chunk cache (CachedRegion) here, which is not ported
+                return self.table().air();
+            };
+            let section = chunk
+                .section((y >> 4) as usize)
+                .map_or(ptr::null(), ptr::from_ref);
+            self.prev_section.set(PrevSection {
+                x: x >> 4,
+                y: y >> 4,
+                z: z >> 4,
+                section,
+            });
+            return self.get_from_section(section, x, y, z);
         }
         // upstream falls back to the chunk cache (CachedRegion) here, which is not ported
         self.table().air()
+    }
+
+    /// [`Self::get_from_chunk`] with the chunk's section at `y`, null for an empty one.
+    #[inline]
+    fn get_from_section(&self, section: *const SubChunk, x: i32, y: i32, z: i32) -> &BlockState {
+        // SAFETY: see `unsafe impl Send`; the section lives as long as `self.world`.
+        match unsafe { section.as_ref() } {
+            None => self.table().air(),
+            Some(section) => self.table().get(section.get(x, y, z)),
+        }
     }
 
     pub fn is_loaded(&self, x: i32, z: i32) -> bool {
@@ -230,6 +288,23 @@ mod tests {
         assert_eq!(bsi.get0(0, i32::MAX, 0).id, AIR);
         assert_eq!(bsi.get0(-1, 0, -1).id, AIR, "not loaded");
         assert_eq!(bsi.get0(0, 0, 0).id, STONE);
+    }
+
+    #[test]
+    fn get0_section_cache() {
+        let bsi = BlockStateInterface::new(world());
+        assert_eq!(bsi.get0(0, 0, 0).id, STONE);
+        assert_eq!(bsi.get0(15, 15, 15).id, AIR, "same section");
+        assert_eq!(bsi.get0(0, 16, 0).id, AIR, "above the cached section and the world");
+        assert_eq!(bsi.get0(0, -1, 0).id, AIR, "empty section of the same chunk");
+        assert_eq!(bsi.get0(0, -16, 0).id, AIR, "empty section, cached");
+        assert_eq!(bsi.get0(0, -17, 0).id, AIR, "below the cached section and the world");
+        assert_eq!(bsi.get0(0, 0, 0).id, STONE);
+        assert_eq!(bsi.get0(16, 0, 0).id, AIR, "not loaded, next to the cached section");
+        assert_eq!(bsi.get0(15, 0, 0).id, AIR);
+        assert_eq!(bsi.get0(-1, -16, 0).id, DIRT, "another chunk");
+        assert_eq!(bsi.get0(0, 0, 0).id, STONE);
+        assert_eq!(bsi.clone().get0(0, 0, 0).id, STONE);
     }
 
     #[test]
