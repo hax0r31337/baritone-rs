@@ -7,8 +7,9 @@
 // The fields a rescan reads and writes live in a mutex shared with it (`State`), since the
 // rescan runs on the executor. `onTick` holds it throughout, so a rescan started during a tick
 // waits for the tick to end before it reads the filter and the blacklist, and its locations
-// land after the tick; upstream races the two. A rescan reads the world, the player and the
-// entities as they were when it was started (the tick does not change them).
+// land after the tick; upstream races the two. A rescan reads the world and the player as they
+// were when it was started (the tick does not change them). The item entities are ignored, so
+// the dropped items are only the anticipated drops.
 //
 // No chunk cache: `searchWorld` treats every block as untracked, so every search scans the
 // loaded chunks (upstream looks up the blocks of `CachedChunk.BLOCKS_TO_KEEP_TRACK_OF` in the
@@ -34,7 +35,7 @@ use crate::api::utils::interfaces::IGoalRenderPos;
 use crate::api::utils::settings_util::maybe_censor;
 use crate::api::utils::{BetterBlockPos, BlockOptionalMetaLookup, IPlayerContext, rotation_utils};
 use crate::cache::faster_world_scanner;
-use crate::host::{Entity, Inventory};
+use crate::host::Inventory;
 use crate::java::{self, IllegalArgumentException, JavaHashMap};
 use crate::pathing::movement::CalculationContext;
 use crate::pathing::movement::movement_helper;
@@ -130,12 +131,7 @@ impl MineProcess {
         lock(&self.state).mine(quantity, filter);
         if rescan_now {
             let context = CalculationContext::from_baritone(baritone);
-            rescan(
-                &self.state,
-                Vec::new(),
-                &context,
-                baritone.player_context.entities(),
-            );
+            rescan(&self.state, Vec::new(), &context);
         }
     }
 
@@ -292,7 +288,7 @@ impl State {
         let legit = settings.legit_mine;
         if !self.known_ore_locations.is_empty() {
             let context = CalculationContext::from_baritone(baritone);
-            let mut dropped = self.dropped_items_scan(baritone.player_context.entities());
+            let mut dropped = self.dropped_items_scan();
             let locs2 = prune(
                 &context,
                 self.known_ore_locations.clone(),
@@ -413,26 +409,17 @@ impl State {
         Arc::new(GoalBlock::from_pos(loc.below()))
     }
 
-    fn dropped_items_scan(&self, entities: &[Entity]) -> Vec<BetterBlockPos> {
+    /// `droppedItemsScan()`: the item entities are ignored, so only the anticipated drops.
+    fn dropped_items_scan(&self) -> Vec<BetterBlockPos> {
         if !settings().mine_scan_dropped_items {
             return Vec::new();
         }
-        let filter = self.filter.as_ref().expect("NullPointerException: filter");
-        let mut ret = Vec::new();
-        for entity in entities {
-            if let Some(item) = entity.as_item_entity()
-                && filter.has_stack(item)
-            {
-                ret.push(entity.block_position());
-            }
-        }
-        ret.extend(self.anticipated_drops.keys().copied());
-        ret
+        self.anticipated_drops.keys().copied().collect()
     }
 
     fn add_nearby(&mut self, baritone: &Baritone) -> bool {
         let ctx = &baritone.player_context;
-        let mut dropped = self.dropped_items_scan(ctx.entities());
+        let mut dropped = self.dropped_items_scan();
         self.known_ore_locations.extend_from_slice(&dropped);
         let player_feet = ctx.player_feet();
         let bsi = BlockStateInterface::from_ctx(ctx);
@@ -483,13 +470,8 @@ impl State {
     }
 }
 
-/// `rescan(List<BlockPos>, CalculationContext)`, over the entities of the tick it started in.
-fn rescan(
-    state: &Mutex<State>,
-    already: Vec<BetterBlockPos>,
-    context: &CalculationContext,
-    entities: &[Entity],
-) {
+/// `rescan(List<BlockPos>, CalculationContext)`
+fn rescan(state: &Mutex<State>, already: Vec<BetterBlockPos>, context: &CalculationContext) {
     let (filter, blacklist, mut dropped) = {
         let s = lock(state);
         let Some(filter) = s.filter_filter() else {
@@ -498,7 +480,7 @@ fn rescan(
         if settings().legit_mine {
             return;
         }
-        let dropped = s.dropped_items_scan(entities);
+        let dropped = s.dropped_items_scan();
         (filter, s.blacklist.clone(), dropped)
     };
     let mut locs = MineProcess::search_world(
@@ -651,12 +633,11 @@ impl IBaritoneProcess for MineProcess {
         } {
             // big brain
             let context = CalculationContext::from_baritone_thread(baritone, true);
-            let entities = baritone.player_context.entities().to_vec();
             let state = Arc::clone(&self.state);
             let already = curr.clone();
             baritone
                 .executor
-                .execute(move || rescan(&state, already, &context, &entities));
+                .execute(move || rescan(&state, already, &context));
         }
         if settings.legit_mine && !s.add_nearby(baritone) {
             s.cancel();

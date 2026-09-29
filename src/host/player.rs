@@ -331,8 +331,6 @@ pub struct Player {
     pub hands_busy: bool,
     /// `containerMenu != inventoryMenu`: a container (chest, crafting table, ...) is open.
     pub container_open: bool,
-    /// `getLightLevelDependentMagicValue()`
-    pub light_level_dependent_magic_value: f32,
     /// `input instanceof PlayerMovementInput`: the client takes its movement input from
     /// Baritone (`InputOverrideHandler`) instead of the keyboard. Baritone sets it.
     pub baritone_input: bool,
@@ -374,7 +372,6 @@ impl Default for Player {
             flying: false,
             hands_busy: false,
             container_open: false,
-            light_level_dependent_magic_value: 0.0,
             baritone_input: false,
             offhand: ItemStack::empty(),
             inventory: Inventory::default(),

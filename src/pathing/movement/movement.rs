@@ -14,8 +14,7 @@ use crate::api::pathing::movement::{IMovement, MovementStatus};
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext, rotation_utils, vec_utils};
 use crate::behavior::PathingBehavior;
-use crate::host::Entity;
-use crate::mc::{Aabb, Direction};
+use crate::mc::Direction;
 use crate::pathing::movement::movement_helper as mh;
 use crate::pathing::movement::movement_state::MovementTarget;
 use crate::pathing::movement::movements::{
@@ -23,7 +22,6 @@ use crate::pathing::movement::movements::{
     MovementParkour, MovementPillar, MovementTraverse,
 };
 use crate::pathing::movement::{CalculationContext, MovementState};
-use crate::settings::settings;
 use crate::utils::BlockStateInterface;
 
 pub const HORIZONTALS_BUT_ALSO_DOWN_____SO_EVERY_DIRECTION_EXCEPT_UP: [Direction; 5] = [
@@ -260,13 +258,8 @@ impl Movement {
         let mut something_in_the_way = false;
         for &block_pos in self.positions_to_break.iter() {
             let ctx = &mut baritone.player_context;
-            let falling = Aabb::new(0.0, 0.0, 0.0, 1.0, 1.1, 1.0).move_pos(block_pos);
-            if ctx.entities().iter().any(|entity| {
-                entity.type_id == Entity::FALLING_BLOCK && entity.bounding_box.intersects(&falling)
-            }) && settings().pause_mining_for_falling_blocks
-            {
-                return false;
-            }
+            // pauseMiningForFallingBlocks: the falling block entities are ignored, so there
+            // are none to wait for
             if !mh::can_walk_through_ctx(ctx, block_pos) {
                 // can't break air, so don't try
                 something_in_the_way = true;

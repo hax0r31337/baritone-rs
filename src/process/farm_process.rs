@@ -11,7 +11,8 @@
 // `locations` is shared with the scan that runs on the executor. `onTick` holds it
 // throughout, so a scan started during a tick lands after it; upstream races the two. The
 // scan reads the world and the player as they were when it was started. The selection
-// manager is not ported, so `farmUsingSelection` never finds a selection.
+// manager is not ported, so `farmUsingSelection` never finds a selection. The other entities
+// are ignored, so there are no dropped items to pick up.
 
 use std::any::Any;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -48,25 +49,6 @@ const FARMLAND_PLANTABLE: [&str; 6] = [
     "minecraft:pumpkin_seeds",
     "minecraft:potato",
     "minecraft:carrot",
-];
-
-const PICKUP_DROPPED: [&str; 16] = [
-    "minecraft:beetroot_seeds",
-    "minecraft:beetroot",
-    "minecraft:melon_seeds",
-    "minecraft:melon_slice",
-    "minecraft:melon",
-    "minecraft:wheat_seeds",
-    "minecraft:wheat",
-    "minecraft:pumpkin_seeds",
-    "minecraft:pumpkin",
-    "minecraft:potato",
-    "minecraft:carrot",
-    "minecraft:nether_wart",
-    "minecraft:cocoa_beans",
-    "minecraft:sugar_cane",
-    "minecraft:bamboo",
-    "minecraft:cactus",
 ];
 
 #[derive(Debug, Default)]
@@ -522,19 +504,7 @@ impl IBaritoneProcess for FarmProcess {
                 goalz.push(Arc::new(GoalBlock::from_pos(pos)));
             }
         }
-        for entity in baritone.player_context.entities() {
-            if let Some(item) = entity.as_item_entity()
-                && entity.on_ground
-                && PICKUP_DROPPED.contains(&item.get_item())
-            {
-                // +0.1 because of farmland's 0.9375 dummy height lol
-                goalz.push(Arc::new(GoalBlock::from_pos(BetterBlockPos::from_f64(
-                    entity.position.x,
-                    entity.position.y + 0.1,
-                    entity.position.z,
-                ))));
-            }
-        }
+        // the dropped items to pick up (pickupDropped) are entities, which are ignored
         if goalz.is_empty() {
             log_direct("Farm failed");
             if settings.notification_on_farm_fail {

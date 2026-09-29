@@ -30,9 +30,7 @@ use baritone::api::utils::i_player_controller::{
 };
 use baritone::api::utils::input::Input;
 use baritone::behavior::look::ForkableRandom;
-use baritone::host::{
-    Chunk, Climbable, Entity, Half, InteractionHand, ItemStack, Openable, Player, World,
-};
+use baritone::host::{Chunk, Climbable, Half, InteractionHand, ItemStack, Openable, Player, World};
 use baritone::java::max_f64;
 use baritone::java::min_f64;
 use baritone::mc::{Aabb, BlockHitResult, Direction, Vec3, mth};
@@ -650,8 +648,6 @@ pub fn process_class(process: &dyn Any) -> &'static str {
         "ExploreProcess"
     } else if process.is::<FarmProcess>() {
         "FarmProcess"
-    } else if process.is::<FollowProcess>() {
-        "FollowProcess"
     } else if process.is::<GetToBlockProcess>() {
         "GetToBlockProcess"
     } else if process.is::<InventoryPauserProcess>() {
@@ -1003,11 +999,6 @@ impl Sim {
                 .most_recent_in_control()
                 .map(|index| process_class(self.baritone.process(index).as_any())),
         }
-    }
-
-    /// Replaces the other entities between ticks.
-    pub fn set_entities(&mut self, entities: Vec<Entity>) {
-        self.baritone.set_entities(entities);
     }
 
     /// Changes a block between ticks.

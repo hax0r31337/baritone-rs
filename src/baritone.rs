@@ -5,7 +5,7 @@
 // and exposes the client events the mixins fire as methods:
 //
 // - `on_tick` at the start of the client tick (`MixinMinecraft.runTick`), with the player,
-//   world and entities of this tick already set;
+//   world of this tick already set;
 // - during the player's `aiStep`: `player_movement_input` (through the input override handler)
 //   for the movement input while the player's `baritone_input` is set,
 //   `on_player_sprint_state` when the client reads the sprint key, and
@@ -33,8 +33,10 @@
 // Background work (`Baritone.getExecutor()`) runs on `executor`, one per `Baritone` where
 // upstream shares a static pool, so a host (or a test) can wait for this Baritone's work.
 //
+// The other entities are ignored, as if there were none.
+//
 // Not ported: the game directory, the command manager, the selection manager, `openClick`,
-// the builder and the elytra process.
+// the builder, the follow and the elytra process.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -48,11 +50,11 @@ use crate::behavior::look::ForkableRandom;
 use crate::behavior::{InventoryBehavior, LookBehavior, PathingBehavior};
 use crate::cache::CachedWorld;
 use crate::event::GameEventHandler;
-use crate::host::{Entity, Player, World};
+use crate::host::{Player, World};
 use crate::java::Executor;
 use crate::process::{
-    BackfillProcess, CustomGoalProcess, ExploreProcess, FarmProcess, FollowProcess,
-    GetToBlockProcess, InventoryPauserProcess, MineProcess,
+    BackfillProcess, CustomGoalProcess, ExploreProcess, FarmProcess, GetToBlockProcess,
+    InventoryPauserProcess, MineProcess,
 };
 use crate::utils::player::BaritonePlayerContext;
 use crate::utils::{BlockStateInterface, InputOverrideHandler, PathingControlManager};
@@ -107,7 +109,6 @@ impl Baritone {
             executor: Executor::new(),
             bsi: None,
         };
-        baritone.register_process(Box::new(FollowProcess::new()));
         baritone.register_process(Box::new(MineProcess::new()));
         baritone.register_process(Box::new(CustomGoalProcess::new())); // very high iq
         baritone.register_process(Box::new(GetToBlockProcess::new()));
@@ -236,15 +237,6 @@ impl Baritone {
             .expect("the inventory pauser process is running")
     }
 
-    pub fn get_follow_process(&self) -> &FollowProcess {
-        self.find_process().expect("the follow process is running")
-    }
-
-    pub fn get_follow_process_mut(&mut self) -> &mut FollowProcess {
-        self.find_process_mut()
-            .expect("the follow process is running")
-    }
-
     pub fn get_mine_process(&self) -> &MineProcess {
         self.find_process().expect("the mine process is running")
     }
@@ -299,11 +291,6 @@ impl Baritone {
     /// The world, for changes (copy on write when a calculation still reads it).
     pub fn world_mut(&mut self) -> Option<&mut World> {
         self.player_context.world.as_mut().map(Arc::make_mut)
-    }
-
-    /// Sets the other entities.
-    pub fn set_entities(&mut self, entities: Vec<Entity>) {
-        self.player_context.entities = entities;
     }
 
     pub fn options_mut(&mut self) -> &mut crate::host::Options {

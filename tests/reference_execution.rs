@@ -30,7 +30,7 @@ use baritone::api::utils::{
     vec_utils,
 };
 use baritone::behavior::PathingBehavior;
-use baritone::host::{Chunk, DimensionType, Entity, Inventory, ItemStack, Player, World};
+use baritone::host::{Chunk, DimensionType, Inventory, Player, World};
 use baritone::mc::{HitResultType, Vec3};
 use baritone::process::{FarmProcess, GetToBlockProcess, MineProcess};
 use baritone::settings::{Settings, set_settings};
@@ -75,7 +75,6 @@ struct Scenario {
     inventory: Inventory,
     config: Value,
     seed: i64,
-    entities: Vec<Entity>,
     /// Chunks within this radius of the player load after every tick.
     load_radius: Option<i32>,
     /// Applied after their tick.
@@ -88,8 +87,6 @@ struct Event {
     tick: usize,
     /// double bits
     teleport: Option<[i64; 3]>,
-    /// The other entities from now on.
-    entities: Option<Vec<Entity>>,
     /// A box of blocks set to `state`.
     from: Option<[i32; 3]>,
     to: Option<[i32; 3]>,
@@ -100,10 +97,6 @@ impl Event {
     fn apply(&self, sim: &mut Sim) {
         if let Some(teleport) = self.teleport {
             sim.teleport(vec3(teleport));
-            return;
-        }
-        if let Some(entities) = &self.entities {
-            sim.set_entities(entities.clone());
             return;
         }
         let (a, b, state) = (self.from.unwrap(), self.to.unwrap(), self.state.unwrap());
@@ -297,7 +290,6 @@ fn process_class_name(name: &str) -> &'static str {
         "CustomGoalProcess",
         "ExploreProcess",
         "FarmProcess",
-        "FollowProcess",
         "GetToBlockProcess",
         "InventoryPauserProcess",
         "MineProcess",
@@ -426,18 +418,6 @@ fn start(sim: &mut Sim, scenario: &Scenario) {
             let block = BlockOptionalMeta::from_selector(&TABLE, &str_of("block")).unwrap();
             GetToBlockProcess::get_to_block(baritone, block);
         }
-        "follow" => {
-            let entity_type = str_of("entity_type");
-            baritone
-                .get_follow_process_mut()
-                .follow(Arc::new(move |e: &Entity| e.type_id == entity_type));
-        }
-        "pickup" => {
-            let item = str_of("item");
-            baritone
-                .get_follow_process_mut()
-                .pickup(move |stack: &ItemStack| stack.get_item() == item);
-        }
         "explore" => baritone
             .get_explore_process_mut()
             .explore(int_of("x"), int_of("z")),
@@ -461,7 +441,6 @@ fn execution_matches_upstream() {
         if let Some(radius) = scenario.load_radius {
             sim.load_chunks_around(build_all_chunks(&scenario.world), radius);
         }
-        sim.set_entities(scenario.entities.clone());
         start(&mut sim, scenario);
         // REPLAY_TRACE=<scenario name> prints every tick of the scenario, both sides
         let trace = std::env::var("REPLAY_TRACE").is_ok_and(|name| name == scenario.name);

@@ -3,8 +3,6 @@
 use rustc_hash::FxHashMap;
 
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
-use crate::host::Entity;
-use crate::settings::settings;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Avoidance {
@@ -74,37 +72,11 @@ impl Avoidance {
     }
 
     /// `create(IPlayerContext)`. The mob spawners come from the chunk cache, which is not
-    /// ported, so only mobs are avoided.
-    pub fn create(ctx: &dyn IPlayerContext) -> Vec<Avoidance> {
-        let settings = settings();
-        if !settings.avoidance {
-            return Vec::new();
-        }
-        let mut res = Vec::new();
-        let mob_coeff = settings.mob_avoidance_coefficient;
+    /// ported, and the mobs are entities, which the port ignores, so nothing is avoided.
+    pub fn create(_ctx: &dyn IPlayerContext) -> Vec<Avoidance> {
         // mobSpawnerAvoidanceCoefficient: ctx.worldData().getCachedWorld().getLocationsOf("mob_spawner", ...)
-        if mob_coeff != 1.0 {
-            for entity in ctx.entities() {
-                if !entity.mob {
-                    continue;
-                }
-                if entity.is_spider() && ctx.player().light_level_dependent_magic_value >= 0.5 {
-                    continue;
-                }
-                if entity.type_id == Entity::ZOMBIFIED_PIGLIN && !entity.provoked {
-                    continue;
-                }
-                if entity.type_id == Entity::ENDERMAN && !entity.creepy {
-                    continue;
-                }
-                res.push(Avoidance::from_pos(
-                    entity.block_position(),
-                    mob_coeff,
-                    settings.mob_avoidance_radius,
-                ));
-            }
-        }
-        res
+        // mobAvoidanceCoefficient: ctx.entitiesStream()
+        Vec::new()
     }
 }
 

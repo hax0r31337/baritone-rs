@@ -4,7 +4,7 @@ This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) t
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
 upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
 table version 4); the field list is at the end. Item and player checks map to `crate::host::player`
-(Table D), other entities to `crate::host::Entity`. Locations are `File.java:line`; every file name used
+(Table D); other entities are ignored, as if there were none. Locations are `File.java:line`; every file name used
 here is unique in the kept scope. `MH` = `MovementHelper.java`.
 
 `tools/refgen` exports the whole table from a real 26.3 client (`tests/fixtures/reference/blocks.json.gz`),
@@ -144,7 +144,7 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
 | `TrapDoorBlock` | `openable = TrapDoor` (+ `open`, `half`) | MH:146,250,547 | Walk-through NO; never fully passable; a closed top trapdoor is solid when waterlogged |
 | `WaterFluid` (fluid type) | `fluid == Water` | MH:227; MovementFall.java:103; MovementParkour.java:81 | Several uses: still water is walk-through, landing in water in Fall, a water-exempt avoid check |
 
-Skipped as non-block (entities and items are in Table D): `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman`
+Skipped as non-block (entities and items are in Table D; entities are ignored): `Mob`/`Spider`/`ZombifiedPiglin`/`Enderman`
 (Avoidance.java:76-79), `ItemEntity`, `InventoryMenu`, `BlockHitResult`, packets, `ClientLevel`,
 Movement*/PathNode/goal classes.
 
@@ -188,10 +188,10 @@ Movement*/PathNode/goal classes.
 | loot table drops (`getLootTable`, default state, netherite pickaxe) | `drops` (new, v4) | BlockOptionalMeta.java:154,223-256 | Item stacks that count as "mined" (MineProcess.java:78,350). **In 26.3 upstream's roll always fails** (`LootContext.Builder.create` asks the stub level for its server, which is null), so every block drops nothing: `mine` quantities are never reached and dropped items never match. The Java-semantics table reproduces that (all empty); a host that sends real drops gets what upstream intends |
 | `CachedChunk.BLOCKS_TO_KEEP_TRACK_OF` + `getLocationsOf` (the chunk cache) | none: every block is untracked, so the loaded chunks are scanned for it (`FasterWorldScanner`) | MineProcess.java:364-390 | Upstream finds chests, furnaces, portals, beds, ... in its cache, which holds the loaded chunks too |
 | `PalettedContainer` palette and storage (mixin accessors) | `PalettedStorage::palette`, `is_single_value`, `palette_index` | FasterWorldScanner.java:358-415 | Skip sections without a matching state; a single-valued section is scanned x, y, z, others y, z, x |
-| `state.getCollisionShape(world, pos)`, `level.isUnobstructed(null, shape)` | `collision_shape`; the player's box and the boxes of entities with `blocks_building` | BuilderProcess.java:342-345 (`placementPlausible`, for Backfill) | Nothing stands where the block would go |
+| `state.getCollisionShape(world, pos)`, `level.isUnobstructed(null, shape)` | `collision_shape`; the player's box (other entities are ignored) | BuilderProcess.java:342-345 (`placementPlausible`, for Backfill) | Nothing stands where the block would go |
 | `level.getChunk(pos) instanceof EmptyLevelChunk` (not block data) | `!World::has_chunk` | BackfillProcess.java:907 | Forget positions in unloaded chunks |
 | `ctx.world().dimension() == Level.NETHER` (not block data) | world `water_evaporates` (new, world-level) | CalculationContext.java:104; MovementFall.java:105 | No water-bucket falls in the Nether |
-| `getEntitiesOfClass(FallingBlockEntity)` (not block data) | `ctx.entities()` with `type_id == "minecraft:falling_block"` whose `bounding_box` intersects | Movement.java:159 | Pause mining while falling blocks are in the air |
+| `getEntitiesOfClass(FallingBlockEntity)` (not block data) | none: entities are ignored, so no falling blocks | Movement.java:159 | Pause mining while falling blocks are in the air |
 
 ## Table D: Items and the player
 
@@ -216,12 +216,11 @@ data driven. `tools/refgen` exports real 26.3 items (`tests/fixtures/reference/p
 | `player.position()`, `xo`/`yo`/`zo`, `getDeltaMovement()`, `getYRot()`/`getXRot()`, `onGround()`, `horizontalCollision` | `position`, `old_position`, `delta_movement`, `y_rot`/`x_rot`, `on_ground`, `horizontal_collision` | execution throughout | `getEyePosition(1.0F)` interpolates from `old_position` |
 | `isCrouching()`, `getEyeHeight()`, `getEyeHeight(Pose.CROUCHING)`, `getBoundingBox()`, `isInWall()`, `isFallFlying()`, `isHandsBusy()` | `crouching`, `eye_height`, `crouching_eye_height`, `bounding_box`, `in_wall`, `fall_flying`, `hands_busy` | execution throughout | Read as the host sent them |
 | `setSprinting(false)`, `getAbilities().flying = false`, `setYRot`/`setXRot`, `getInventory().setSelectedSlot(i)`, `player.input = new PlayerMovementInput(...)` | `sprinting`, `flying`, `y_rot`/`x_rot`, `inventory.selected`, `baritone_input` | PathExecutor.java:238; Movement.java:124; LookBehavior.java:99-100,115-122; MH:662; InputOverrideHandler.java:98 | What Baritone changes; the host applies it |
-| `containerMenu != inventoryMenu`, `getItemBySlot(OFFHAND)`, `getLightLevelDependentMagicValue()` | `container_open`, `offhand`, `light_level_dependent_magic_value` | InventoryBehavior.java:64,208; Avoidance.java:77 | |
-| `instanceof Mob`, `Spider`, `ZombifiedPiglin` + `getLastHurtByMob() != null`, `Enderman` + `isCreepy()` | `Entity::mob`, `type_id` (spider, cave spider), `provoked`, `creepy` | Avoidance.java:76-79 | Mob avoidance |
+| `containerMenu != inventoryMenu`, `getItemBySlot(OFFHAND)` | `container_open`, `offhand` | InventoryBehavior.java:64,208 | |
+| `ctx.entitiesStream()`: `instanceof Mob`, `Spider` + `getLightLevelDependentMagicValue()`, `ZombifiedPiglin` + `getLastHurtByMob() != null`, `Enderman` + `isCreepy()` | none: entities are ignored, so no mobs to avoid | Avoidance.java:76-79 | Mob avoidance |
 | `options.sensitivity()`, `options.autoJump()` | `Options::sensitivity`, `Options::auto_jump` | LookBehavior.java:305; PathingBehavior.java:246-250 | Mouse steps; no auto jump while pathing |
-| `instanceof ItemEntity`, `getItem()` | `Entity::as_item_entity` (`type_id == "minecraft:item"`, `Entity::item`) | MineProcess.java:348-351; FollowProcess.java:130; FarmProcess.java:820-823 | Dropped items to mine toward, pick up, or farm |
-| `entity.isAlive()`, `entity.onGround()`, `entity.equals(other)`, `distanceToSqr(player)` | `Entity::alive`, `on_ground`, equal `id`s, `distance_to_sqr` | FollowProcess.java:81-91; FarmProcess.java:821 | Followable entities; items lying on the ground |
-| `entity.blocksBuilding`, `isRemoved()`, spectators (`EntitySelector.NO_SPECTATORS`) | `Entity::blocks_building` (the host leaves out spectators and removed entities); the local player always counts | BuilderProcess.java:344 | `placementPlausible` |
+| `instanceof ItemEntity`, `getItem()`, `entity.onGround()` | none: entities are ignored, so no dropped items (the mine process still goes for its anticipated drops) | MineProcess.java:348-351; FarmProcess.java:820-823 | Dropped items to mine toward or farm |
+| `entity.blocksBuilding`, `isRemoved()`, spectators (`EntitySelector.NO_SPECTATORS`) | only the local player counts; other entities are ignored | BuilderProcess.java:344 | `placementPlausible` |
 | `getNonEquipmentItems()`, `ItemStack.getCount()` | the 36 main slots, `ItemStack::count` | MineProcess.java:77-79 | Mined enough |
 | `getBaritoneHash()` (mixin) minus the damage | the item id (`ItemStack::get_item`) | BlockOptionalMeta.java:748-755; BlockOptionalMetaLookup.java:87-91 | Item stacks that match a block's drops |
 | `Items.X`, `stack.getItem() == item`, `stack.is(item)` | item ids | FarmProcess.java:511-537,623-637 | Plantable seeds, bone meal, cocoa beans, pickup list |

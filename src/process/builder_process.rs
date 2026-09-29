@@ -2,10 +2,9 @@
 //
 // Only `GoalBreak`, which the farm process uses, and `placementPlausible`, which the backfill
 // process uses; the builder itself is not ported (plans/port.md). `placementPlausible` is a
-// function of the player context. For `Level.isUnobstructed`, the entities in the way are the
-// local player and the entities whose `blocks_building` is set (the host leaves spectators
-// out), and an entity is in the way when its box overlaps one of the block's collision boxes
-// (`Shapes.joinIsNotEmpty(shape, Shapes.create(box), AND)`).
+// function of the player context. For `Level.isUnobstructed`, the only entity in the way is the
+// local player (the others are ignored), when its box overlaps one of the block's collision
+// boxes (`Shapes.joinIsNotEmpty(shape, Shapes.create(box), AND)`).
 
 use std::fmt;
 
@@ -31,12 +30,8 @@ pub fn placement_plausible(
 
 /// `Level.isUnobstructed(null, shape)`
 fn is_unobstructed(ctx: &dyn IPlayerContext, shape: &[Aabb]) -> bool {
-    let overlaps = |bb: &Aabb| shape.iter().any(|b| b.intersects(bb));
-    !overlaps(&ctx.player().bounding_box)
-        && !ctx
-            .entities()
-            .iter()
-            .any(|entity| entity.blocks_building && overlaps(&entity.bounding_box))
+    let bb = &ctx.player().bounding_box;
+    !shape.iter().any(|b| b.intersects(bb))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

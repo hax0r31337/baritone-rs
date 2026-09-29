@@ -3,15 +3,15 @@
 // `minecraft()` is `options()`, the one part of `Minecraft` ported code reads. `worldData()`
 // (the chunk cache) and `viewerPos()` (rendering) are not ported. `player()` and `world()`
 // panic when there is none, where upstream would throw a `NullPointerException`; callers that
-// care check `is_in_world` first, like upstream's null checks. `entities()` leaves out the
-// local player, which upstream's includes; callers that went through it skip the player
-// anyway. `entitiesStream()` is `entities().iter()`.
+// care check `is_in_world` first, like upstream's null checks. `entities()` and
+// `entitiesStream()` are not ported: the port ignores the other entities, as if there were
+// none.
 
 use std::sync::Arc;
 
 use crate::api::utils::i_player_controller::{IPlayerController, PlayerController};
 use crate::api::utils::{BetterBlockPos, Rotation};
-use crate::host::{Entity, Options, Player, World};
+use crate::host::{Options, Player, World};
 use crate::mc::{BlockHitResult, HitResultType, Vec3};
 
 pub trait IPlayerContext {
@@ -35,9 +35,6 @@ pub trait IPlayerContext {
     fn player_controller_ref(&self) -> &dyn IPlayerController;
 
     fn world(&self) -> &Arc<World>;
-
-    /// `entities()`: every entity but the local player.
-    fn entities(&self) -> &[Entity];
 
     fn object_mouse_over(&self) -> BlockHitResult;
 

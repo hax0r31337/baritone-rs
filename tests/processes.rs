@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use baritone::api::utils::{BetterBlockPos, BlockOptionalMeta};
 use baritone::host::{
-    BlockState, BlockStateTable, Chunk, DimensionType, Entity, Inventory, ItemStack, Player, World,
+    BlockState, BlockStateTable, Chunk, DimensionType, Inventory, ItemStack, Player, World,
 };
-use baritone::mc::{Aabb, Vec3};
+use baritone::mc::Vec3;
 use baritone::process::{GetToBlockProcess, MineProcess};
 use baritone::settings::{Settings, set_settings, settings, update_settings};
 use common::sim::{Sim, TickRecord};
@@ -81,26 +81,6 @@ fn player() -> Player {
     }
 }
 
-/// An item lying on the ground at `pos`.
-fn item_entity(id: i32, pos: Vec3, item: &str) -> Entity {
-    Entity {
-        id,
-        type_id: Entity::ITEM.to_owned(),
-        position: pos,
-        bounding_box: Aabb::new(
-            pos.x - 0.125,
-            pos.y,
-            pos.z - 0.125,
-            pos.x + 0.125,
-            pos.y + 0.25,
-            pos.z + 0.125,
-        ),
-        on_ground: true,
-        item: Some(ItemStack::of(item)),
-        ..Entity::default()
-    }
-}
-
 /// Puts `count` of `item` in slot 8, as if picked up.
 fn give(sim: &mut Sim, item: &str, count: i32) {
     sim.baritone.player_mut().unwrap().inventory.items[8] = ItemStack {
@@ -166,35 +146,6 @@ fn mines_until_it_has_enough() {
 }
 
 #[test]
-fn goes_for_dropped_items() {
-    let _settings = settings_lock();
-    update_settings(|s| s.explore_for_blocks = false);
-    let mut sim = Sim::new(flat(table_with_drops()), player(), 7);
-    let drop = Vec3::new(6.5, 1.0, 2.5);
-    sim.set_entities(vec![item_entity(1, drop, "minecraft:oak_log")]);
-    MineProcess::mine_by_name(&mut sim.baritone, 1, &["oak_log"]).unwrap();
-    let first = sim.tick();
-    assert_eq!(
-        first.command.as_deref(),
-        Some("REVALIDATE_GOAL_AND_PATH GoalComposite[GoalBlock{x=6,y=1,z=2}]")
-    );
-    let mut picked_up = false;
-    for _ in 0..400 {
-        let r = sim.tick();
-        trace(&sim, &r);
-        if !picked_up && sim.player().position.distance_to(drop) < 1.0 {
-            picked_up = true;
-            sim.set_entities(Vec::new());
-            give(&mut sim, "minecraft:oak_log", 1);
-        }
-        if picked_up && r.in_control.is_none() {
-            return;
-        }
-    }
-    panic!("never got to the item, or kept mining after picking it up");
-}
-
-#[test]
 fn opens_a_chest_under_a_block() {
     let _settings = settings_lock();
     let mut world = flat(Arc::clone(&TABLE));
@@ -254,25 +205,4 @@ fn backfill_turns_itself_off_with_parkour() {
     let mut sim = Sim::new(flat(Arc::clone(&TABLE)), player(), 7);
     sim.tick();
     assert!(!settings().backfill);
-}
-
-#[test]
-fn follows_only_entities_close_enough() {
-    let _settings = settings_lock();
-    update_settings(|s| s.follow_target_max_distance = 10);
-    let mut sim = Sim::new(flat(Arc::clone(&TABLE)), player(), 7);
-    sim.set_entities(vec![item_entity(
-        1,
-        Vec3::new(20.5, 1.0, 0.5),
-        "minecraft:stick",
-    )]);
-    sim.baritone
-        .get_follow_process_mut()
-        .follow(Arc::new(|e: &Entity| e.as_item_entity().is_some()));
-    assert_eq!(sim.tick().in_control, None, "20 blocks away is too far");
-    update_settings(|s| s.follow_target_max_distance = 30);
-    assert_eq!(
-        sim.tick().command.as_deref(),
-        Some("REVALIDATE_GOAL_AND_PATH GoalComposite[GoalNear{x=20, y=1, z=0, rangeSq=9}]")
-    );
 }

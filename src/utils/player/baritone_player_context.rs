@@ -1,6 +1,6 @@
 // Ported from baritone src/main/java/baritone/utils/player/BaritonePlayerContext.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
-// Holds what the host sent (the player, the world, the other entities, the options) and the
+// Holds what the host sent (the player, the world, the options) and the
 // host's player controller, where upstream reads them from `Minecraft`. `playerRotations()`
 // asks `LookBehavior.getEffectiveRotation()`, which reads `LookBehavior.serverRotation`; the
 // context keeps that rotation (`server_rotation`) because it is what reads it.
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::api::utils::i_player_controller::{IPlayerController, PlayerController};
 use crate::api::utils::{IPlayerContext, Rotation, ray_trace_utils};
-use crate::host::{Entity, Options, Player, World};
+use crate::host::{Options, Player, World};
 use crate::mc::BlockHitResult;
 use crate::settings::settings;
 
@@ -17,7 +17,6 @@ use crate::settings::settings;
 pub struct BaritonePlayerContext {
     pub(crate) player: Option<Player>,
     pub(crate) world: Option<Arc<World>>,
-    pub(crate) entities: Vec<Entity>,
     pub(crate) options: Options,
     pub(crate) player_controller: Box<dyn IPlayerController>,
     /// `LookBehavior.serverRotation`: the rotation known to the server.
@@ -29,7 +28,6 @@ impl BaritonePlayerContext {
         Self {
             player: None,
             world: None,
-            entities: Vec::new(),
             options: Options::default(),
             player_controller,
             server_rotation: None,
@@ -81,10 +79,6 @@ impl IPlayerContext for BaritonePlayerContext {
 
     fn world(&self) -> &Arc<World> {
         self.world.as_ref().expect("NullPointerException: world")
-    }
-
-    fn entities(&self) -> &[Entity] {
-        &self.entities
     }
 
     fn player_rotations(&self) -> Rotation {

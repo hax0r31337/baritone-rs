@@ -42,7 +42,6 @@ import baritone.process.BuilderProcess;
 import baritone.process.CustomGoalProcess;
 import baritone.process.ExploreProcess;
 import baritone.process.FarmProcess;
-import baritone.process.FollowProcess;
 import baritone.process.GetToBlockProcess;
 import baritone.process.InventoryPauserProcess;
 import baritone.process.MineProcess;
@@ -77,9 +76,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeMap;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.Inventory;
@@ -161,7 +158,7 @@ import java.util.zip.GZIPOutputStream;
  * simulation around the port; keep the two in sync operation for operation.
  * <p>
  * The client objects are stand-ins allocated without a constructor (Minecraft, ClientLevel and
- * its chunk cache and entities, LocalPlayer, MultiPlayerGameMode, Options, the world provider's
+ * its chunk cache, LocalPlayer, MultiPlayerGameMode, Options, the world provider's
  * cached world), over a world held here. The Baritone is allocated the same way and wired with
  * the real behaviors, the real control manager and the processes the port has.
  * <p>
@@ -344,17 +341,15 @@ final class ExecRefGen {
         }
 
         /**
-         * The local player and the other entities, like the client's entity storage.
+         * The local player, the only entity: the port ignores the others, as if there were none.
          */
         FakePlayer player;
-        List<Entity> entities = new ArrayList<>();
 
         List<Entity> all() {
             List<Entity> all = new ArrayList<>();
             if (player != null) {
                 all.add(player);
             }
-            all.addAll(entities);
             return all;
         }
 
@@ -659,8 +654,6 @@ final class ExecRefGen {
         BlockRefGen.setField(Player.class, player, "inventoryMenu", menu);
         player.containerMenu = menu;
         player.input = new ClientInput();
-        // entities are equal when their ids are; the scenarios' entities count from 1
-        player.setId(1000);
         // as LivingEntity's constructor sets it
         BlockRefGen.setField(Entity.class, player, "blocksBuilding", true);
         return player;
@@ -1055,12 +1048,9 @@ final class ExecRefGen {
             geh.registerEventListener(input);
             PathingControlManager pcm = new PathingControlManager(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "pathingControlManager", pcm);
-            // the processes the port has, in upstream's registration order; the builder and
-            // elytra processes are never active, and upstream asks the builder for
-            // placementPlausible
-            FollowProcess follow = new FollowProcess(baritone);
-            BlockRefGen.setField(Baritone.class, baritone, "followProcess", follow);
-            pcm.registerProcess(follow);
+            // the processes the port has, in upstream's registration order; the follow, builder
+            // and elytra processes are never active (there are no entities to follow), and
+            // upstream asks the builder for placementPlausible
             MineProcess mine = new MineProcess(baritone);
             BlockRefGen.setField(Baritone.class, baritone, "mineProcess", mine);
             pcm.registerProcess(mine);
@@ -1542,16 +1532,6 @@ final class ExecRefGen {
             BlockRefGen.setField(Entity.class, player, "bb", playerBox(position, player.isCrouching()));
             BlockRefGen.setField(Entity.class, player, "deltaMovement", Vec3.ZERO);
         }
-
-        /**
-         * Replaces the other entities between ticks.
-         */
-        void setEntities(List<EntitySpec> entities) throws ReflectiveOperationException {
-            level.entities = new ArrayList<>();
-            for (EntitySpec e : entities) {
-                level.entities.add(e.create(level));
-            }
-        }
     }
 
     /**
@@ -1691,7 +1671,6 @@ final class ExecRefGen {
         final int ticks;
         final List<Event> events;
         JsonObject process;
-        List<EntitySpec> entities = List.of();
         int loadRadius = -1;
 
         Scenario(String name, ExecWorld world, Vec3 start, BlockPos goal, ItemStack[] items, int selected,
@@ -1734,11 +1713,6 @@ final class ExecRefGen {
             return this;
         }
 
-        Scenario entities(EntitySpec... entities) {
-            this.entities = List.of(entities);
-            return this;
-        }
-
         Scenario loadRadius(int loadRadius) {
             this.loadRadius = loadRadius;
             return this;
@@ -1748,8 +1722,7 @@ final class ExecRefGen {
     /**
      * Starts the scenario's process. The process JSON has a {@code type}: {@code mine}
      * ({@code quantity}, {@code blocks}: selectors), {@code get_to_block} ({@code block}: a
-     * selector), {@code follow} ({@code entity_type}), {@code pickup} ({@code item}),
-     * {@code explore} ({@code x}, {@code z}) or {@code farm} ({@code range}).
+     * selector), {@code explore} ({@code x}, {@code z}) or {@code farm} ({@code range}).
      */
     static void start(Sim sim, Scenario s) {
         if (s.process == null) {
@@ -1764,14 +1737,6 @@ final class ExecRefGen {
                 sim.baritone.getMineProcess().mineByName(p.get("quantity").getAsInt(), blocks.toArray(new String[0]));
             }
             case "get_to_block" -> sim.baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(p.get("block").getAsString()));
-            case "follow" -> {
-                String type = p.get("entity_type").getAsString();
-                sim.baritone.getFollowProcess().follow(e -> BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString().equals(type));
-            }
-            case "pickup" -> {
-                net.minecraft.world.item.Item item = BuiltInRegistries.ITEM.getValue(Identifier.parse(p.get("item").getAsString()));
-                sim.baritone.getFollowProcess().pickup(stack -> stack.is(item));
-            }
             case "explore" -> sim.baritone.getExploreProcess().explore(p.get("x").getAsInt(), p.get("z").getAsInt());
             case "farm" -> sim.baritone.getFarmProcess().farm(p.get("range").getAsInt(), null);
             default -> throw new IllegalArgumentException(p.toString());
@@ -1779,67 +1744,16 @@ final class ExecRefGen {
     }
 
     /**
-     * An item entity: {@code item} lying at {@code position}.
-     */
-    record EntitySpec(int id, Vec3 position, boolean onGround, ItemStack item) {
-        /**
-         * As the port's {@code host::Entity}.
-         */
-        JsonObject json() {
-            JsonObject o = new JsonObject();
-            o.addProperty("id", id);
-            o.addProperty("type_id", "minecraft:item");
-            JsonArray pos = new JsonArray();
-            pos.add(position.x);
-            pos.add(position.y);
-            pos.add(position.z);
-            o.add("position", pos);
-            AABB bb = EntityTypes.ITEM.getDimensions().makeBoundingBox(position);
-            JsonArray box = new JsonArray();
-            for (double d : new double[]{bb.minX, bb.minY, bb.minZ, bb.maxX, bb.maxY, bb.maxZ}) {
-                box.add(d);
-            }
-            o.add("bounding_box", box);
-            o.addProperty("on_ground", onGround);
-            o.addProperty("alive", true);
-            o.addProperty("blocks_building", false);
-            o.add("item", PathRefGen.itemJson(item));
-            return o;
-        }
-
-        ItemEntity create(FakeLevel level) throws ReflectiveOperationException {
-            ItemEntity e = new ItemEntity(EntityTypes.ITEM, level);
-            e.setId(id);
-            e.setPos(position.x, position.y, position.z);
-            e.setItem(item.copy());
-            // setOnGround looks for the supporting block through the chunks
-            BlockRefGen.setField(Entity.class, e, "onGround", onGround);
-            return e;
-        }
-    }
-
-    static JsonArray entitiesJson(List<EntitySpec> entities) {
-        JsonArray a = new JsonArray();
-        entities.forEach(e -> a.add(e.json()));
-        return a;
-    }
-
-    /**
      * Something that happens after tick {@code tick}: a box of blocks changes ({@code state}
-     * from {@code a} to {@code b}), the player is moved to {@code teleport}, or the other
-     * entities become {@code entities}.
+     * from {@code a} to {@code b}), or the player is moved to {@code teleport}.
      */
-    record Event(int tick, BlockPos a, BlockPos b, BlockState state, Vec3 teleport, List<EntitySpec> entities) {
+    record Event(int tick, BlockPos a, BlockPos b, BlockState state, Vec3 teleport) {
         static Event fill(int tick, BlockPos a, BlockPos b, BlockState state) {
-            return new Event(tick, a, b, state, null, null);
+            return new Event(tick, a, b, state, null);
         }
 
         static Event teleport(int tick, Vec3 to) {
-            return new Event(tick, null, null, null, to, null);
-        }
-
-        static Event entities(int tick, EntitySpec... entities) {
-            return new Event(tick, null, null, null, null, List.of(entities));
+            return new Event(tick, null, null, null, to);
         }
 
         JsonObject json() {
@@ -1847,8 +1761,6 @@ final class ExecRefGen {
             o.addProperty("tick", tick);
             if (teleport != null) {
                 o.add("teleport", bits(teleport));
-            } else if (entities != null) {
-                o.add("entities", entitiesJson(entities));
             } else {
                 o.add("from", blockPos(a));
                 o.add("to", blockPos(b));
@@ -1860,10 +1772,6 @@ final class ExecRefGen {
         void apply(Sim sim) throws ReflectiveOperationException {
             if (teleport != null) {
                 sim.teleport(teleport);
-                return;
-            }
-            if (entities != null) {
-                sim.setEntities(entities);
                 return;
             }
             for (int x = Math.min(a.getX(), b.getX()); x <= Math.max(a.getX(), b.getX()); x++) {
@@ -2198,10 +2106,6 @@ final class ExecRefGen {
         return w;
     }
 
-    static EntitySpec item(int id, double x, double y, double z, net.minecraft.world.item.Item item) {
-        return new EntitySpec(id, new Vec3(x, y, z), true, stack(item, 1));
-    }
-
     static List<Scenario> processScenarios() {
         List<Scenario> list = new ArrayList<>();
         Vec3 start = new Vec3(0.5, 1.0, 0.5);
@@ -2270,24 +2174,6 @@ final class ExecRefGen {
         list.add(new Scenario("get_to_missing", platform(-24, 48), start, null, pickaxe, 0, processConfig(), 150)
                 .process("type", "get_to_block", "block", "diamond_block"));
 
-        // follow an item around, then it is gone
-        EntitySpec stick = item(1, 6.5, 1.0, 0.5, Items.STICK);
-        list.add(new Scenario("follow", flat(), start, null, basicItems(), 0, processConfig(), 320,
-                List.of(Event.entities(60, item(1, 12.5, 1.0, 5.5, Items.STICK)),
-                        Event.entities(150, item(1, 4.5, 1.0, 12.5, Items.STICK)),
-                        Event.entities(250)))
-                .process("type", "follow", "entity_type", "minecraft:item")
-                .entities(stick));
-        list.add(new Scenario("follow_offset", flat(), start, null, basicItems(), 0,
-                processConfig("followOffsetDistance", 3.0, "followOffsetDirection", 90.0, "followRadius", 1), 200)
-                .process("type", "follow", "entity_type", "minecraft:item")
-                .entities(item(7, -8.5, 1.0, 6.25, Items.STICK)));
-        // pick up the wheat, not the stick; then the wheat is picked up
-        list.add(new Scenario("pickup", flat(), start, null, basicItems(), 0, processConfig(), 200,
-                List.of(Event.entities(120, item(3, -6.5, 1.0, -4.5, Items.STICK))))
-                .process("type", "pickup", "item", "minecraft:wheat")
-                .entities(item(2, 5.5, 1.0, 2.25, Items.WHEAT), item(3, -6.5, 1.0, -4.5, Items.STICK)));
-
         // explore: chunks load around the player as it goes
         ExecWorld explore = platform(-80, 160);
         explore.loaded.clear();
@@ -2300,8 +2186,7 @@ final class ExecRefGen {
                 .process("type", "explore", "x", 0, "z", 0)
                 .loadRadius(2));
 
-        // farm: ripe and unripe crops, open farmland, a jungle log for cocoa, sugar cane and an
-        // item to pick up
+        // farm: ripe and unripe crops, open farmland, a jungle log for cocoa and sugar cane
         ExecWorld farm = flat();
         for (int x = 2; x <= 5; x++) {
             farm.set(x, 0, 2, Blocks.FARMLAND.defaultBlockState());
@@ -2320,8 +2205,7 @@ final class ExecRefGen {
         farming[3] = stack(Items.BONE_MEAL, 8);
         farming[4] = stack(Items.COCOA_BEANS, 4);
         list.add(new Scenario("farm", farm, start, null, farming, 0, processConfig(), 600)
-                .process("type", "farm", "range", 0)
-                .entities(item(4, -5.5, 1.0, -1.5, Items.WHEAT)));
+                .process("type", "farm", "range", 0));
 
         // farm: a grown bamboo stalk (its top done growing) with its base in reach and the block
         // above not: bone meal would not grow the stalk, so the player walks up and harvests it
@@ -2380,7 +2264,6 @@ final class ExecRefGen {
             if (s.process != null) {
                 o.add("process", s.process);
             }
-            o.add("entities", entitiesJson(s.entities));
             if (s.loadRadius >= 0) {
                 o.addProperty("load_radius", s.loadRadius);
             }
@@ -2389,7 +2272,6 @@ final class ExecRefGen {
             ExecWorld world = s.world.copy();
             Sim sim = new Sim(world, s.start, s.items, s.selected, seed);
             sim.loadRadius = s.loadRadius;
-            sim.setEntities(s.entities);
             start(sim, s);
             JsonArray ticks = new JsonArray();
             for (int t = 0; t < s.ticks; t++) {

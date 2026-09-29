@@ -47,6 +47,9 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   `BlockStateInterface` owns one snapshot, which replaces `createThreadSafeCopy`.
 - The chunk cache (`CachedRegion`, `WorldData`) is not ported. Where upstream falls back to it,
   the port does what upstream does without world data (air, not loaded).
+- Entities other than the local player are ignored, as if there were none: no mob avoidance,
+  no waiting for falling blocks, no dropped items to go for (the mine process keeps its
+  anticipated drops), only the player obstructs placement, and `FollowProcess` is not ported.
 - `Pair<A, B>` is a tuple, nullable values are `Option`.
 
 ## Java numeric semantics
@@ -133,7 +136,7 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 - `Behavior`'s `baritone`/`ctx` fields are not ported; behaviors, movements and the path
   executor get the `Baritone` (or the context) passed in.
 - `IPlayerContext` is a trait with upstream's default methods, implemented by
-  `BaritonePlayerContext`, which holds the player, world, entities and options the host sent.
+  `BaritonePlayerContext`, which holds the player, world and options the host sent.
   `ctx.minecraft().options` is `options()`. `LookBehavior.serverRotation` lives in the context,
   which is what reads it.
 - The client's objects that upstream changes (the player's selected slot, sprinting, flying,
@@ -161,7 +164,7 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   The fields a process's background task reads and writes live in an `Arc<Mutex<_>>` shared
   with it; the process holds the mutex for its whole `on_tick`, so a task started during the
   tick reads and writes after it, one of the orders upstream's race allows. A task gets
-  snapshots of what it reads from the player context (world, player, entities) taken when it
+  snapshots of what it reads from the player context (world, player) taken when it
   starts; the tick does not change them. `synchronized` process methods lock that mutex too.
 - A `java.util.HashMap` that upstream iterates is `crate::java::JavaHashMap`, which iterates in
   Java's order (`MineProcess.anticipatedDrops`, `BackfillProcess.blocksToReplace`, keyed by
@@ -234,7 +237,7 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   upstream `Baritone` (allocated without its constructor and wired with the real behaviors,
   `PathingControlManager` and every process the port has, in upstream's registration order)
   runs against stand-in client objects (`Minecraft`, `ClientLevel` with its chunk cache and
-  entities, `LocalPlayer`, `MultiPlayerGameMode`, `Options`, a world provider whose cached
+  no entities but the player, `LocalPlayer`, `MultiPlayerGameMode`, `Options`, a world provider whose cached
   world marks the loaded chunks every tick) and a simulated client: simplified movement (input,
   jumping, friction, gravity, collision with block shapes, stepping up 0.6, sneaking at edges,
   climbing) and a simplified game mode (break progress from `ToolSet`, placing throwaways,
@@ -251,9 +254,8 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   the loaded-chunk edge, inventory swaps and pauses, random terrain, and every process: mining
   (the shaft below a block, exposed ores only, legit mining, blacklisting unreachable blocks,
   running away when nothing is known), getting to blocks (opening a crafting table, none
-  known), following and picking up item entities, exploring while chunks load around the
-  player, farming (harvesting, planting, bone meal, cocoa, sugar cane, items to pick up) and
-  backfilling. Process scenarios do not plan ahead (a process that changes its goal cancels the
+  known), exploring while chunks load around the player, farming (harvesting, planting, bone
+  meal, cocoa, sugar cane) and backfilling. Process scenarios do not plan ahead (a process that changes its goal cancels the
   next segment's calculation, which then ends cancelled or failed depending on thread timing)
   and do not scan for dropped items (upstream matches item stacks through a mixin). Every
   tick's player state (bit for bit), forced inputs, game mode calls, path events, path
