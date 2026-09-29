@@ -80,6 +80,8 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   (`bsi.settings()`, also what `CalculationContext` copies its fields from) and the costs its
   context captured. Where upstream reads a setting live mid-calculation (`avoidBreaking`,
   `costOfPlacingAt`, `canWalkOn`, ...), a change reaches the port's next calculation instead.
+  Goal heuristics hold no snapshot and keep reading live, through `with_settings` and
+  `with_action_costs`: a thread-local cache that only compares a pointer.
 - Goals: `Goal` trait. Goals that hold other goals use `Arc<dyn Goal>`, since goals are shared
   between the tick thread and calculation threads. `equals` is `Goal::equals` (and
   `PartialEq for dyn Goal`); `instanceof` is a downcast through `Any`, except
@@ -102,7 +104,12 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   its reference with the result. Paths hand out `&[Movement]` (the only `IMovement`);
   `CutoffPath` copies the part of the previous path it keeps.
 - Object graphs become arenas: `PathNode`s live in the search's `Vec`, `previous` is an index,
-  and open sets take the arena in each call.
+  and open sets take the arena in each call. `BinaryHeapOpenSet` stores each node's
+  `combined_cost` beside its index, copied on `insert`/`update`, so sifts compare without
+  reading the arena. The `longHash` → node map is `NodeMap`, open addressing like fastutil's
+  `Long2ObjectOpenHashMap` (sized by `pathingMapDefaultSize` and `pathingMapLoadFactor`), with
+  keys next to values; `calculate0` prefetches the slot of a movement's fixed destination
+  before calculating its cost.
 - `catch (Exception e)` around a whole computation (`AbstractNodeCostSearch.calculate`) is
   `catch_unwind`: the panics that stand in for upstream's exceptions become the same result.
 - `Helper.logDebug`/`logDirect`/`logNotification` and `System.out.println` go to the `log` crate

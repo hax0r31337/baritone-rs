@@ -295,12 +295,28 @@ mod tests {
         let bsi = BlockStateInterface::new(world());
         assert_eq!(bsi.get0(0, 0, 0).id, STONE);
         assert_eq!(bsi.get0(15, 15, 15).id, AIR, "same section");
-        assert_eq!(bsi.get0(0, 16, 0).id, AIR, "above the cached section and the world");
-        assert_eq!(bsi.get0(0, -1, 0).id, AIR, "empty section of the same chunk");
+        assert_eq!(
+            bsi.get0(0, 16, 0).id,
+            AIR,
+            "above the cached section and the world"
+        );
+        assert_eq!(
+            bsi.get0(0, -1, 0).id,
+            AIR,
+            "empty section of the same chunk"
+        );
         assert_eq!(bsi.get0(0, -16, 0).id, AIR, "empty section, cached");
-        assert_eq!(bsi.get0(0, -17, 0).id, AIR, "below the cached section and the world");
+        assert_eq!(
+            bsi.get0(0, -17, 0).id,
+            AIR,
+            "below the cached section and the world"
+        );
         assert_eq!(bsi.get0(0, 0, 0).id, STONE);
-        assert_eq!(bsi.get0(16, 0, 0).id, AIR, "not loaded, next to the cached section");
+        assert_eq!(
+            bsi.get0(16, 0, 0).id,
+            AIR,
+            "not loaded, next to the cached section"
+        );
         assert_eq!(bsi.get0(15, 0, 0).id, AIR);
         assert_eq!(bsi.get0(-1, -16, 0).id, DIRT, "another chunk");
         assert_eq!(bsi.get0(0, 0, 0).id, STONE);

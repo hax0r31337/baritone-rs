@@ -1,5 +1,6 @@
 pub mod a_star_path_finder;
 pub mod abstract_node_cost_search;
+pub mod node_map;
 pub mod openset;
 pub mod path;
 pub mod path_node;

@@ -4,9 +4,10 @@
 // can supply its own tuning; `ActionCosts::java()` has the upstream values, and the active
 // instance is process-global like upstream's constants (`action_costs()`).
 
+use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
-use arc_swap::{ArcSwap, Guard};
+use arc_swap::{ArcSwap, Cache, Guard};
 
 /// don't make this Double.MAX_VALUE because it's added to other things, maybe other COST_INFs,
 /// and that would make it overflow to negative
@@ -122,6 +123,20 @@ static ACTION_COSTS: LazyLock<ArcSwap<ActionCosts>> =
 /// The active costs (upstream's `ActionCosts` constants).
 pub fn action_costs() -> Guard<Arc<ActionCosts>> {
     ACTION_COSTS.load()
+}
+
+type ActionCostsCache = Cache<&'static ArcSwap<ActionCosts>, Arc<ActionCosts>>;
+
+thread_local! {
+    static ACTION_COSTS_CACHE: RefCell<ActionCostsCache> =
+        RefCell::new(Cache::new(LazyLock::force(&ACTION_COSTS)));
+}
+
+/// Runs `f` on the active costs, like `settings::with_settings`: the next call sees a
+/// replacement, and a call only compares a pointer. `f` must not call `with_action_costs` again.
+#[inline]
+pub fn with_action_costs<R>(f: impl FnOnce(&ActionCosts) -> R) -> R {
+    ACTION_COSTS_CACHE.with(|cache| f(cache.borrow_mut().load()))
 }
 
 /// Replaces the active costs. Calculations already running keep the costs they captured.

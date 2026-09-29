@@ -13,9 +13,10 @@
 //! Serialized names are upstream's (`allowBreak`, `primaryTimeoutMS`, ...); missing fields
 //! deserialize to their defaults.
 
+use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
-use arc_swap::{ArcSwap, Guard};
+use arc_swap::{ArcSwap, Cache, Guard};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -752,6 +753,21 @@ pub fn settings() -> Guard<Arc<Settings>> {
 /// read one of these instead of calling [`settings`], which costs an atomic handshake per call.
 pub fn settings_snapshot() -> Arc<Settings> {
     SETTINGS.load_full()
+}
+
+type SettingsCache = Cache<&'static ArcSwap<Settings>, Arc<Settings>>;
+
+thread_local! {
+    static SETTINGS_CACHE: RefCell<SettingsCache> = RefCell::new(Cache::new(LazyLock::force(&SETTINGS)));
+}
+
+/// Runs `f` on the active settings. Like [`settings`], a replacement is seen by the next call,
+/// but a call only compares a pointer against the settings this thread saw last, where
+/// [`settings`] costs an atomic handshake. For hot paths that cannot hold a snapshot (goal
+/// heuristics). `f` must not call `with_settings` again.
+#[inline]
+pub fn with_settings<R>(f: impl FnOnce(&Settings) -> R) -> R {
+    SETTINGS_CACHE.with(|cache| f(cache.borrow_mut().load()))
 }
 
 /// Replaces the active settings.

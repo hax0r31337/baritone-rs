@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::api::pathing::goals::{Goal, goal_equals};
-use crate::api::pathing::movement::action_costs;
+use crate::api::pathing::movement::with_action_costs;
 use crate::api::utils::settings_util::maybe_censor;
 
 /// Useful for mining (getting to diamond / iron level)
@@ -21,12 +21,13 @@ impl GoalYLevel {
     pub fn calculate(goal_y: i32, current_y: i32) -> f64 {
         if current_y > goal_y {
             // need to descend
-            return action_costs().fall_n_blocks_cost[2] / 2.0
+            return with_action_costs(|costs| costs.fall_n_blocks_cost[2]) / 2.0
                 * current_y.wrapping_sub(goal_y) as f64;
         }
         if current_y < goal_y {
             // need to ascend
-            return goal_y.wrapping_sub(current_y) as f64 * action_costs().jump_one_block_cost;
+            return goal_y.wrapping_sub(current_y) as f64
+                * with_action_costs(|costs| costs.jump_one_block_cost);
         }
         0.0
     }

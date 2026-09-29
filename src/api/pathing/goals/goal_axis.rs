@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::api::pathing::goals::{Goal, GoalYLevel, goal_equals};
 use crate::java;
-use crate::settings::settings;
+use crate::settings::with_settings;
 
 const SQRT_2_OVER_2: f64 = std::f64::consts::SQRT_2 / 2.0;
 
@@ -19,7 +19,8 @@ impl GoalAxis {
 
 impl Goal for GoalAxis {
     fn is_in_goal(&self, x: i32, y: i32, z: i32) -> bool {
-        y == settings().axis_height && (x == 0 || z == 0 || x.wrapping_abs() == z.wrapping_abs())
+        y == with_settings(|settings| settings.axis_height)
+            && (x == 0 || z == 0 || x.wrapping_abs() == z.wrapping_abs())
     }
 
     fn heuristic(&self, x0: i32, y: i32, z0: i32) -> f64 {
@@ -35,9 +36,9 @@ impl Goal for GoalAxis {
             java::min_f64(z as f64, diff as f64 * SQRT_2_OVER_2),
         );
 
-        let settings = settings();
-        flat_axis_distance * settings.cost_heuristic
-            + GoalYLevel::calculate(settings.axis_height, y)
+        let (cost_heuristic, axis_height) =
+            with_settings(|settings| (settings.cost_heuristic, settings.axis_height));
+        flat_axis_distance * cost_heuristic + GoalYLevel::calculate(axis_height, y)
     }
 
     fn equals(&self, other: &dyn Goal) -> bool {

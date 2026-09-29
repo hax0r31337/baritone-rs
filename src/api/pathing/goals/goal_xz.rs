@@ -6,7 +6,7 @@ use crate::api::pathing::goals::{Goal, goal_equals};
 use crate::api::utils::BetterBlockPos;
 use crate::api::utils::settings_util::maybe_censor;
 use crate::mc::{Vec3, mth};
-use crate::settings::settings;
+use crate::settings::with_settings;
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
@@ -47,7 +47,7 @@ impl GoalXZ {
             diagonal = z;
         }
         diagonal *= SQRT_2;
-        (diagonal + straight) * settings().cost_heuristic // big TODO tune
+        (diagonal + straight) * with_settings(|settings| settings.cost_heuristic) // big TODO tune
     }
 
     pub fn from_direction(origin: Vec3, yaw: f32, distance: f64) -> GoalXZ {

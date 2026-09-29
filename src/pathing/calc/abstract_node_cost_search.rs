@@ -15,13 +15,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use rustc_hash::FxHashMap;
-
 use crate::api::pathing::calc::IPath;
 use crate::api::pathing::goals::Goal;
 use crate::api::utils::BetterBlockPos;
 use crate::api::utils::helper::{log_debug, log_direct, log_notification, println};
 use crate::api::utils::path_calculation_result::{PathCalculationResult, Type};
+use crate::pathing::calc::node_map::NodeMap;
 use crate::pathing::calc::{Path, PathNode};
 use crate::pathing::movement::CalculationContext;
 use crate::settings::settings;
@@ -56,7 +55,7 @@ pub struct AbstractNodeCostSearch {
     /// See <https://github.com/cabaletta/baritone/issues/107>
     ///
     /// `longHash` → index in `nodes`.
-    pub(crate) map: FxHashMap<i64, u32>,
+    pub(crate) map: NodeMap,
 
     /// The node arena.
     pub(crate) nodes: Vec<PathNode>,
@@ -180,8 +179,10 @@ impl AbstractNodeCostSearch {
         goal: Arc<dyn Goal>,
         context: CalculationContext,
     ) -> Self {
-        // pathingMapLoadFactor tunes the Java hash map; hashbrown's is fixed
-        let capacity = usize::try_from(settings().pathing_map_default_size).unwrap_or(0);
+        let settings = settings();
+        let capacity = usize::try_from(settings.pathing_map_default_size).unwrap_or(0);
+        let load_factor = settings.pathing_map_load_factor;
+        drop(settings);
         Self {
             real_start,
             start_x,
@@ -189,7 +190,7 @@ impl AbstractNodeCostSearch {
             start_z,
             goal,
             context,
-            map: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+            map: NodeMap::new(capacity, load_factor),
             nodes: Vec::with_capacity(capacity),
             start_node: None,
             most_recent_considered: None,
@@ -450,7 +451,7 @@ pub(crate) fn dist_from_start_sq(start_x: i32, start_y: i32, start_z: i32, n: &P
 /// fields separately.
 #[inline]
 pub(crate) fn node_at_position(
-    map: &mut FxHashMap<i64, u32>,
+    map: &mut NodeMap,
     nodes: &mut Vec<PathNode>,
     goal: &dyn Goal,
     x: i32,
@@ -458,7 +459,7 @@ pub(crate) fn node_at_position(
     z: i32,
     hash_code: i64,
 ) -> u32 {
-    *map.entry(hash_code).or_insert_with(|| {
+    map.get_or_insert_with(hash_code, || {
         let index = u32::try_from(nodes.len()).expect("too many path nodes");
         nodes.push(PathNode::new(x, y, z, goal));
         index

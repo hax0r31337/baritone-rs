@@ -206,6 +206,15 @@ impl AStarPathFinder {
                 if cy + moves.y_offset() > height || cy + moves.y_offset() < min_y {
                     continue;
                 }
+                if !moves.dynamic_xz() && !moves.dynamic_y() {
+                    // Not in upstream: the destination is known, so its map slot can load
+                    // while the movement's cost is calculated
+                    map.prefetch(BetterBlockPos::long_hash(
+                        new_x,
+                        cy + moves.y_offset(),
+                        new_z,
+                    ));
+                }
                 res.reset();
                 moves.apply(calc_context, cx, cy, cz, &mut res);
                 num_movements_considered += 1;
