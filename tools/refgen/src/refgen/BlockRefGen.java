@@ -121,13 +121,16 @@ final class BlockRefGen {
     private static final int HEIGHT = 32;
 
     /**
-     * Datagen's vanilla registries (enchantments, ...), set by {@link #write}.
+     * Datagen's vanilla registries (enchantments, ...), set by {@link #bindRegistries}.
      */
     static HolderLookup.Provider LOOKUP;
 
     private BlockRefGen() {}
 
-    static void write(String upstream, String minecraft, Path out) throws Exception {
+    /**
+     * Binds the block and item tags and the item components, and sets {@link #LOOKUP}.
+     */
+    static void bindRegistries() throws Exception {
         bindTags(BuiltInRegistries.BLOCK, "block");
         if (!Blocks.SOUL_FIRE.defaultBlockState().is(TagKey.create(Registries.BLOCK, Identifier.parse("minecraft:fire")))) {
             throw new IllegalStateException("block tags not bound");
@@ -141,6 +144,10 @@ final class BlockRefGen {
         if (!Items.IRON_SWORD.getDefaultInstance().is(ItemTags.SWORDS)) {
             throw new IllegalStateException("item tags not bound");
         }
+    }
+
+    static void write(String upstream, String minecraft, Path out) throws Exception {
+        bindRegistries();
 
         List<BlockState> states = new ArrayList<>();
         Block.BLOCK_STATE_REGISTRY.forEach(states::add);

@@ -36,7 +36,7 @@ pub fn avoid_breaking(
     if !bsi.world_border.can_place_at(x, z) {
         return true;
     }
-    settings().blocks_to_disallow_breaking.contains(&state.name)
+    bsi.settings().blocks_to_disallow_breaking.contains(&state.name)
         || state.avoid_breaking // ice becomes water, and water can mess up the path; infested: obvious reasons
         // call context.get directly with x,y,z. no need to make 5 new BlockPos for no reason
         || avoid_adjacent_breaking(bsi, x, y.wrapping_add(1), z, true)
@@ -60,7 +60,7 @@ pub fn avoid_adjacent_breaking(
     if !directly_above // it is fine to mine a block that has a falling block directly above, this (the cost of breaking the stacked fallings) is included in cost calculations
         // therefore if directlyAbove is true, we will actually ignore if this is falling
         && state.falls // obviously, this check is only valid for falling blocks
-        && settings().avoid_updating_falling_blocks // and if the setting is enabled
+        && bsi.settings().avoid_updating_falling_blocks // and if the setting is enabled
         && falling_block_is_free(bsi.get0(x, y.wrapping_sub(1), z))
     {
         // and if it would fall (i.e. it's unsupported)
@@ -69,7 +69,7 @@ pub fn avoid_adjacent_breaking(
     // only pure liquids for now
     // waterlogged blocks can have closed bottom sides and such
     if state.liquid_block {
-        if directly_above || settings().strict_liquid_check {
+        if directly_above || bsi.settings().strict_liquid_check {
             return true;
         }
         // LiquidBlock.LEVEL == 0
@@ -177,7 +177,7 @@ pub fn can_walk_through_position(
             return false;
         }
         // Everything after this point has to be a special case as it relies on the water not being flowing, which means a special case is needed.
-        if settings().assume_walk_on_water {
+        if bsi.settings().assume_walk_on_water {
             return false;
         }
 
@@ -414,14 +414,14 @@ pub fn can_walk_on_position(
             || (up_state.fluid == Fluid::Water && !up_state.fluid_source)
         {
             // the only scenario in which we can walk on flowing water is if it's under still water with jesus off
-            return is_water(up_state) && !settings().assume_walk_on_water;
+            return is_water(up_state) && !bsi.settings().assume_walk_on_water;
         }
         // if assumeWalkOnWater is on, we can only walk on water if there isn't water above it
         // if assumeWalkOnWater is off, we can only walk on water if there is water above it
-        return is_water(up_state) ^ settings().assume_walk_on_water;
+        return is_water(up_state) ^ bsi.settings().assume_walk_on_water;
     }
 
-    if is_lava(state) && !is_flowing(x, y, z, state, bsi) && settings().assume_walk_on_lava {
+    if is_lava(state) && !is_flowing(x, y, z, state, bsi) && bsi.settings().assume_walk_on_lava {
         // if we get here it means that assumeWalkOnLava must be true, so put it last
         return true;
     }

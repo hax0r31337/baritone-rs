@@ -748,6 +748,12 @@ pub fn settings() -> Guard<Arc<Settings>> {
     SETTINGS.load()
 }
 
+/// The active settings, kept: later replacements do not reach the returned snapshot. Hot paths
+/// read one of these instead of calling [`settings`], which costs an atomic handshake per call.
+pub fn settings_snapshot() -> Arc<Settings> {
+    SETTINGS.load_full()
+}
+
 /// Replaces the active settings.
 pub fn set_settings(settings: Settings) {
     SETTINGS.store(Arc::new(settings));

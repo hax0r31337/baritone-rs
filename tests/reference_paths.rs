@@ -93,8 +93,6 @@ type MoveResult = (usize, i32, i32, i32, i64);
 struct MoveSample {
     /// The settings the context is built with.
     config: String,
-    /// The settings the moves then run with, when they changed after the context was built.
-    live_config: Option<String>,
     /// With the fields `ElytraProcess.WalkOffCalculationContext` sets.
     walk_off: bool,
     player: PlayerSpec,
@@ -169,13 +167,8 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_config(config: &str) -> MutexGuard<'static, ()> {
     let guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    apply_config(config);
-    guard
-}
-
-/// Only while holding the guard `with_config` returns.
-fn apply_config(config: &str) {
     set_settings(serde_json::from_value(FIXTURE.configs[config].clone()).unwrap());
+    guard
 }
 
 fn dbl(bits: i64) -> f64 {
@@ -452,9 +445,6 @@ fn moves_match_upstream() {
                 context.min_fall_height = 8;
                 context.max_fall_height_no_water = 10000;
             }
-            if let Some(live) = &sample.live_config {
-                apply_config(live);
-            }
             let mut res = MutableMoveResult::new();
             for (x, y, z, expected) in &sample.positions {
                 let mut got = Vec::new();
@@ -476,10 +466,9 @@ fn moves_match_upstream() {
                         s
                     };
                     mismatches.push(format!(
-                        "world {index} ({}), config {} (live {:?}, walk off {}), {:?}, at ({x}, {y}, {z}):\n  got     {}\n  upstream{}",
+                        "world {index} ({}), config {} (walk off {}), {:?}, at ({x}, {y}, {z}):\n  got     {}\n  upstream{}",
                         w.kind,
                         sample.config,
-                        sample.live_config,
                         sample.walk_off,
                         sample.player,
                         describe(&got),

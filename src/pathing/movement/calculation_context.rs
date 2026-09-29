@@ -3,7 +3,8 @@
 // Built from what the host sends instead of `IBaritone`: a world snapshot and the player
 // (`new`), or the player context's (`from_baritone`). The `baritone` field is not kept, since
 // movements no longer hold one. The active `ActionCosts` are captured here, so a calculation
-// keeps one set of costs throughout, like the settings below.
+// keeps one set of costs throughout, like the settings below. The settings `bsi` captured are
+// the ones the fields below come from, and the ones `costOfPlacingAt` reads.
 //
 // Upstream shares one context between the tick thread and the calculation it starts. The
 // port's `BlockStateInterface` and `ToolSet` caches are single-threaded, so the calculation
@@ -25,7 +26,6 @@ use crate::api::pathing::movement::{ActionCosts, COST_INF, action_costs};
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::host::{BlockState, Inventory, Player, World};
 use crate::pathing::precompute::PrecomputedData;
-use crate::settings::settings;
 use crate::utils::pathing::BetterWorldBorder;
 use crate::utils::{BlockStateInterface, ToolSet};
 
@@ -112,10 +112,10 @@ impl CalculationContext {
         has_generic_throwaway: bool,
         for_use_on_another_thread: bool,
     ) -> Self {
-        let settings = settings();
+        let bsi = BlockStateInterface::new(Arc::clone(&world));
+        let settings = Arc::clone(bsi.settings_arc());
         let costs = Arc::clone(&action_costs());
         let precomputed_data = Arc::new(PrecomputedData::new(world.table()));
-        let bsi = BlockStateInterface::new(Arc::clone(&world));
         let tool_set = ToolSet::new(Arc::clone(&player), Arc::clone(world.table()));
         let has_throwaway = settings.allow_place && has_generic_throwaway;
         let has_water_bucket = settings.allow_water_bucket_fall
@@ -207,7 +207,7 @@ impl CalculationContext {
         if !self.world_border.can_place_at(x, z) {
             return COST_INF;
         }
-        let settings = settings();
+        let settings = self.bsi.settings();
         if !settings.allow_place_in_fluids_source && current.fluid_source {
             return COST_INF;
         }

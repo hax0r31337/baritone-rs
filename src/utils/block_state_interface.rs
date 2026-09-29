@@ -5,6 +5,10 @@
 // ported: where upstream falls back to it, the port behaves like upstream without world data
 // (air, not loaded). Not needed: `access` and `isPassableBlockPos`, which exist to call
 // Minecraft APIs; block shapes come from the host table.
+//
+// The interface also holds the settings active when it was created, which the movement
+// helpers that take it read instead of `Baritone.settings()`: a calculation sees one set of
+// settings throughout, where upstream would see a change made while it runs.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -12,7 +16,7 @@ use std::sync::Arc;
 
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
 use crate::host::{BlockState, BlockStateTable, Chunk, World};
-use crate::settings::settings;
+use crate::settings::{Settings, settings, settings_snapshot};
 use crate::utils::pathing::BetterWorldBorder;
 
 /// Wraps get for chuck caching capability
@@ -24,6 +28,7 @@ pub struct BlockStateInterface {
     /// Chunk X, chunk Z and the chunk of the last lookup. The chunk is owned by `world`.
     prev: Cell<Option<(i32, i32, NonNull<Chunk>)>>,
     use_the_real_world: bool,
+    settings: Arc<Settings>,
 }
 
 // SAFETY: `prev` only points into chunks owned by `self.world`, an immutable snapshot that
@@ -33,13 +38,14 @@ pub struct BlockStateInterface {
 unsafe impl Send for BlockStateInterface {}
 
 impl Clone for BlockStateInterface {
-    /// Another interface over the same snapshot, with its own lookup cache.
+    /// Another interface over the same snapshot and settings, with its own lookup cache.
     fn clone(&self) -> Self {
         Self {
             world: Arc::clone(&self.world),
             world_border: self.world_border,
             prev: Cell::new(None),
             use_the_real_world: self.use_the_real_world,
+            settings: Arc::clone(&self.settings),
         }
     }
 }
@@ -47,12 +53,25 @@ impl Clone for BlockStateInterface {
 impl BlockStateInterface {
     /// `new BlockStateInterface(ctx, true)`: reads from a snapshot of the world.
     pub fn new(world: Arc<World>) -> Self {
+        let settings = settings_snapshot();
         Self {
             world_border: BetterWorldBorder::new(&world.border()),
             world,
             prev: Cell::new(None),
-            use_the_real_world: !settings().path_through_cached_only,
+            use_the_real_world: !settings.path_through_cached_only,
+            settings,
         }
+    }
+
+    /// The settings active when this interface was created.
+    #[inline]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// [`Self::settings`], shared.
+    pub fn settings_arc(&self) -> &Arc<Settings> {
+        &self.settings
     }
 
     /// `new BlockStateInterface(IPlayerContext)`: reads the context's current world.

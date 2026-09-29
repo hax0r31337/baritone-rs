@@ -377,7 +377,7 @@ final class PathRefGen {
         return s;
     }
 
-    private static Map<String, Inventory0> inventories() {
+    static Map<String, Inventory0> inventories() {
         Map<String, Inventory0> m = new LinkedHashMap<>();
         m.put("empty", inventory(0));
 
@@ -655,7 +655,7 @@ final class PathRefGen {
      * The CalculationContext upstream's constructor would build for this player and the
      * current settings.
      */
-    static CalculationContext context(IBaritone baritone, ClientLevel level, ArrayBsi bsi, Inventory0 inv, PlayerSpec p)
+    static CalculationContext context(IBaritone baritone, ClientLevel level, BlockStateInterface bsi, Inventory0 inv, PlayerSpec p)
             throws Exception {
         LocalPlayer player = fakePlayer(inv, p.effects);
         Settings s = BaritoneAPI.getSettings();
@@ -983,10 +983,10 @@ final class PathRefGen {
                                          Map<String, Inventory0> inventories, List<String> configNames, List<String> inventoryNames)
             throws Exception {
         JsonArray out = new JsonArray();
-        // 0, 1: random positions. 2: random positions, and the settings change after the context
-        // is built (upstream reads some of them from the context and some live). At the hotspots:
-        // 3: assumeWalkOnWater only in the context, 4: WalkOffCalculationContext's fields,
-        // 5: ladders and vines avoided.
+        // 0, 1, 2: random positions. At the hotspots: 3: assumeWalkOnWater, 4:
+        // WalkOffCalculationContext's fields, 5: ladders and vines avoided. The settings stay as
+        // the context was built with: upstream reads some of them live, the port reads all of them
+        // from the context.
         for (int k = 0; k < 6; k++) {
             boolean atHotspots = k >= 3;
             if (atHotspots && world.hotspots.isEmpty()) {
@@ -996,11 +996,6 @@ final class PathRefGen {
                 case 3 -> WALK_ON_WATER_CONFIG;
                 case 5 -> AVOID_CLIMBABLE_CONFIG;
                 default -> configNames.get(R.nextInt(configNames.size()));
-            };
-            String liveConfig = switch (k) {
-                case 2 -> configNames.get(R.nextInt(configNames.size()));
-                case 3 -> "a";
-                default -> null;
             };
             boolean walkOff = k == 4;
             BlockRefGen.apply(configs.getAsJsonObject(config));
@@ -1012,14 +1007,8 @@ final class PathRefGen {
                 context.minFallHeight = 8;
                 context.maxFallHeightNoWater = 10000;
             }
-            if (liveConfig != null) {
-                BlockRefGen.apply(configs.getAsJsonObject(liveConfig));
-            }
             JsonObject o = new JsonObject();
             o.addProperty("config", config);
-            if (liveConfig != null) {
-                o.addProperty("live_config", liveConfig);
-            }
             o.addProperty("walk_off", walkOff);
             o.add("player", player.json());
             // [x, y, z, [move ordinal, x, y, z, cost bits]... for each finite cost]
@@ -1226,7 +1215,7 @@ final class PathRefGen {
     /**
      * {@code AbstractNodeCostSearch.mapSize()}, which is protected.
      */
-    private static int mapSize(AStarPathFinder finder) throws ReflectiveOperationException {
+    static int mapSize(AStarPathFinder finder) throws ReflectiveOperationException {
         java.lang.reflect.Method method = AbstractNodeCostSearch.class.getDeclaredMethod("mapSize");
         method.setAccessible(true);
         return (int) method.invoke(finder);

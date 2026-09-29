@@ -75,7 +75,11 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
   the upstream field name (the settings tests enforce this).
 - `ActionCosts` is a runtime struct (`ActionCosts::java()` = upstream values). Static uses of its
   constants read `action_costs()`; `COST_INF` stays a constant.
-- Both globals are `ArcSwap` snapshots: cheap to read, replaced atomically.
+- Both globals are `ArcSwap` snapshots, replaced atomically. A read still costs an atomic
+  handshake, so a calculation reads the settings its `BlockStateInterface` captured
+  (`bsi.settings()`, also what `CalculationContext` copies its fields from) and the costs its
+  context captured. Where upstream reads a setting live mid-calculation (`avoidBreaking`,
+  `costOfPlacingAt`, `canWalkOn`, ...), a change reaches the port's next calculation instead.
 - Goals: `Goal` trait. Goals that hold other goals use `Arc<dyn Goal>`, since goals are shared
   between the tick thread and calculation threads. `equals` is `Goal::equals` (and
   `PartialEq for dyn Goal`); `instanceof` is a downcast through `Any`, except
@@ -183,7 +187,7 @@ that the next diff can be ported mechanically too. The upstream commit is in `UP
 ## Verification
 
 `tools/refgen/run.sh` compiles the real upstream classes against the real 26.3 client jar. The
-classes under test are listed in `SOURCES`; javac compiles whatever else they reference from
+classes under test are listed in `SOURCES` (`tools/refgen/common.sh`); javac compiles whatever else they reference from
 upstream's source tree (`-sourcepath`). Only `BaritoneAPI` is stubbed, because the real one reads
 the settings file and boots the Baritone provider; `Settings` is the real class, and the
 provider is whatever `ExecRefGen` installs. `RefGen`
@@ -210,8 +214,8 @@ here: `RefGen.main` prints failures to the original stream. It writes:
   queries per world reach `Path`'s fake start node, "movement became impossible", the
   load-boundary cutoff, cancellation (by a goal that cancels on its Nth `isInGoal`), timeouts
   (0, which expires at the first check) and `slowPath` (without the delay). Extra move samples
-  sit at ledges above pools and inside ladder and vine columns, with settings changed after the
-  context was built and with `WalkOffCalculationContext`'s fields. The one branch no fixture
+  sit at ledges above pools and inside ladder and vine columns, and with
+  `WalkOffCalculationContext`'s fields. The one branch no fixture
   reaches is `MovementDescend.dynamicFallCost`'s flowing water check: `canWalkThrough` has
   already rejected flowing water there, upstream too. The client objects the code reaches for are stand-ins
   allocated without a constructor (`ClientLevel`, `LocalPlayer`, an array-backed
@@ -256,9 +260,31 @@ here: `RefGen.main` prints failures to the original stream. It writes:
 
 `tests/reference_*.rs` replay the fixtures and compare floats bit for bit.
 
-To cover a newly ported class: add its upstream source to `SOURCES` in `run.sh`, add a section
-to `RefGen.java`, `BlockRefGen.java`, `PathRefGen.java` or `ExecRefGen.java` (a scenario, when
-it runs during execution), regenerate, and add a replay test. Upstream code that
+To cover a newly ported class: add its upstream source to `SOURCES` in `common.sh`, add a
+section to `RefGen.java`, `BlockRefGen.java`, `PathRefGen.java` or `ExecRefGen.java` (a
+scenario, when it runs during execution), regenerate, and add a replay test. Upstream code that
 cannot run standalone may be copied into `RefGen.java` verbatim (see the `RotationUtils`
 region). Regenerate after every upstream sync; the replay tests fail if the fixture's commit
 differs from `UPSTREAM`.
+
+## Benchmark
+
+`MINECRAFT_EULA=true tools/bench/run.sh` times path calculation of upstream (the classes refgen
+compiles) against the port, on worlds the vanilla 26.3 dedicated server generates from random
+seeds (`--seeds` to pick them): the server force-loads 24x24 chunks of the Overworld and the
+Nether (`ServerWorldGen`, cached per seed in `target/bench-cache`), and `RegionWorld` reads its
+region files into real `LevelChunk`s with the game's block state codec, read by upstream's real
+`BlockStateInterface` through a stand-in chunk cache. The server only starts once its EULA is
+agreed to, which `MINECRAFT_EULA=true` says you do. `refgen.Bench` picks queries (to a block,
+far away along x/z, to a spot near a block, to an ore, down to y -58), runs them with default
+settings and a player with tools, and writes the worlds, queries, upstream's results and times
+to `target/bench`. `examples/bench.rs` runs the same queries on the port, fails if any
+calculation ends differently (result, nodes, path, cost, best path so far), and writes
+`target/bench/report.md`. A calculation ends at the goal, at the edge of the loaded chunks, or
+after `--budget` nodes (the goal cancels the search, like `PathRefGen.CancellingGoal`), so
+both sides do the same work; the timed part is the path finder's construction and `calculate`,
+median of `--reps` passes after `--warmup` passes over the same world. Before anything is
+timed, upstream runs every query of every world (at least `--jit-min` passes, then until the
+JIT's compilation is under 0.5% of a pass and pass times are within 3%, at most `--jit-max`),
+so no world is timed with code the JIT has not compiled for it; the report shows these passes
+and the JIT compilation during each world's timed passes.
