@@ -355,7 +355,7 @@ impl State {
                 ctx.player_controller_ref().get_block_reach_distance(),
             );
             if let Some(reachable) = reachable {
-                baritone.look_behavior.update_target(ctx, reachable, true);
+                baritone.look_behavior.update_target(reachable);
                 if ctx
                     .get_selected_block()
                     .is_some_and(|selected| known_locations.contains(&selected))

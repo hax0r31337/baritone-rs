@@ -10,8 +10,7 @@
 //   for the movement input while the player's `baritone_input` is set,
 //   `on_player_sprint_state` when the client reads the sprint key, and
 //   `on_player_rotation_move` when it turns movement input into motion (jumping and
-//   `moveRelative`; while fall flying also a `MotionUpdate` around the elytra move, whose
-//   rotation the player takes for the move and gives back after it);
+//   `moveRelative`);
 // - `on_player_update(Pre)` at the end of `LocalPlayer.tick`'s `super.tick()`, so after the
 //   player moved: the look behavior sets the player's rotation here;
 // - `on_send_rotation` for every rotation `LocalPlayer.sendChanges` sends to the server, then

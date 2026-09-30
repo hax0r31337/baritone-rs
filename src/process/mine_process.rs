@@ -668,7 +668,7 @@ impl IBaritoneProcess for MineProcess {
                 if let Some(rot) = rot
                     && is_safe_to_cancel
                 {
-                    baritone.look_behavior.update_target(ctx, rot, true);
+                    baritone.look_behavior.update_target(rot);
                     let world = Arc::clone(ctx.world());
                     movement_helper::switch_to_best_tool_for(
                         &mut baritone.player_context,

@@ -11,7 +11,6 @@ use crate::api::utils::i_player_controller::{IPlayerController, PlayerController
 use crate::api::utils::{IPlayerContext, Rotation, ray_trace_utils};
 use crate::host::{Options, Player, World};
 use crate::mc::BlockHitResult;
-use crate::settings::settings;
 
 /// Implementation of [`IPlayerContext`] that provides information about the primary player.
 pub struct BaritonePlayerContext {
@@ -34,13 +33,10 @@ impl BaritonePlayerContext {
         }
     }
 
-    /// `LookBehavior.getEffectiveRotation()`
+    /// `LookBehavior.getEffectiveRotation()`, as if `freeLook` were always on: the look behavior
+    /// only ever rotates server-side.
     pub fn get_effective_rotation(&self) -> Option<Rotation> {
-        if settings().free_look {
-            return self.server_rotation;
-        }
-        // If freeLook isn't on, just defer to the player's actual rotations
-        None
+        self.server_rotation
     }
 }
 

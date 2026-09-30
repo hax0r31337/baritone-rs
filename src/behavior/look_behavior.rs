@@ -4,8 +4,11 @@
 // which is what reads it. `onSendPacket` is `on_send_rotation`: the host calls it with the
 // rotation of every `ServerboundMovePlayerPacket` that has one. The random offsets come from a
 // clock-seeded `ForkableRandom` like upstream; `with_random` seeds it for reproducible runs.
-
-use std::collections::VecDeque;
+//
+// Unlike upstream, every target is `Target.Mode.SERVER`: the rotation is only ever set silently
+// for the tick and the player's rotation is restored afterwards. The settings upstream picks the
+// mode with (`freeLook`, `blockFreeLook`, `antiCheatCompatibility`, the smooth and elytra look
+// ones) are not ported.
 
 use crate::api::behavior::look::{IAimProcessor, ITickableAimProcessor};
 use crate::api::event::events::RotationMoveEvent;
@@ -13,23 +16,18 @@ use crate::api::event::events::tick_event;
 use crate::api::event::events::r#type::EventState;
 use crate::api::utils::{IPlayerContext, Rotation};
 use crate::behavior::look::ForkableRandom;
-use crate::java::{average, round_f32};
+use crate::java::round_f32;
 use crate::settings::settings;
 use crate::utils::player::BaritonePlayerContext;
 
 pub struct LookBehavior {
     /// The current look target, may be `None`.
-    target: Option<Target>,
+    target: Option<Rotation>,
 
-    /// The last player rotation. Used to restore the player's angle when using free look.
-    ///
-    /// See `Settings.freeLook`
+    /// The last player rotation. Used to restore the player's angle after the silent rotation.
     prev_rotation: Option<Rotation>,
 
     processor: AbstractAimProcessor,
-
-    smooth_yaw_buffer: VecDeque<f32>,
-    smooth_pitch_buffer: VecDeque<f32>,
 }
 
 impl Default for LookBehavior {
@@ -49,18 +47,11 @@ impl LookBehavior {
             target: None,
             prev_rotation: None,
             processor: AbstractAimProcessor::new(rand),
-            smooth_yaw_buffer: VecDeque::new(),
-            smooth_pitch_buffer: VecDeque::new(),
         }
     }
 
-    pub fn update_target(
-        &mut self,
-        ctx: &dyn IPlayerContext,
-        rotation: Rotation,
-        block_interact: bool,
-    ) {
-        self.target = Some(Target::new(rotation, Mode::resolve(ctx, block_interact)));
+    pub fn update_target(&mut self, rotation: Rotation) {
+        self.target = Some(rotation);
     }
 
     pub fn get_aim_processor(&self) -> &dyn IAimProcessor {
@@ -80,52 +71,17 @@ impl LookBehavior {
 
         match state {
             EventState::Pre => {
-                if target.mode == Mode::None {
-                    // Just return for PRE, we still want to set target to null on POST
-                    return;
-                }
-
                 let player = ctx.player();
                 self.prev_rotation = Some(Rotation::new(player.y_rot, player.x_rot));
-                let actual = self.processor.peek_rotation(ctx, target.rotation);
+                let actual = self.processor.peek_rotation(ctx, target);
                 set_y_rot(ctx, actual.get_yaw());
                 set_x_rot(ctx, actual.get_pitch());
             }
             EventState::Post => {
                 // Reset the player's rotations back to their original values
                 if let Some(prev_rotation) = self.prev_rotation {
-                    let smooth_look_ticks = settings().smooth_look_ticks;
-                    self.smooth_yaw_buffer.push_back(target.rotation.get_yaw());
-                    while self.smooth_yaw_buffer.len() as i64 > smooth_look_ticks as i64 {
-                        self.smooth_yaw_buffer
-                            .pop_front()
-                            .expect("NoSuchElementException");
-                    }
-                    self.smooth_pitch_buffer
-                        .push_back(target.rotation.get_pitch());
-                    while self.smooth_pitch_buffer.len() as i64 > smooth_look_ticks as i64 {
-                        self.smooth_pitch_buffer
-                            .pop_front()
-                            .expect("NoSuchElementException");
-                    }
-                    let fall_flying = ctx.player().fall_flying;
-                    if target.mode == Mode::Server {
-                        set_y_rot(ctx, prev_rotation.get_yaw());
-                        set_x_rot(ctx, prev_rotation.get_pitch());
-                    } else if if fall_flying {
-                        settings().elytra_smooth_look
-                    } else {
-                        settings().smooth_look
-                    } {
-                        let yaw = average(self.smooth_yaw_buffer.iter().map(|&d| d as f64))
-                            .unwrap_or(prev_rotation.get_yaw() as f64);
-                        set_y_rot(ctx, yaw as f32);
-                        if fall_flying {
-                            let pitch = average(self.smooth_pitch_buffer.iter().map(|&d| d as f64))
-                                .unwrap_or(prev_rotation.get_pitch() as f64);
-                            set_x_rot(ctx, pitch as f32);
-                        }
-                    }
+                    set_y_rot(ctx, prev_rotation.get_yaw());
+                    set_x_rot(ctx, prev_rotation.get_pitch());
                     //ctx.player().xRotO = prevRotation.getPitch();
                     //ctx.player().yRotO = prevRotation.getYaw();
                     self.prev_rotation = None;
@@ -149,7 +105,7 @@ impl LookBehavior {
 
     pub fn pig(&self, ctx: &mut BaritonePlayerContext) {
         if let Some(target) = self.target {
-            let actual = self.processor.peek_rotation(ctx, target.rotation);
+            let actual = self.processor.peek_rotation(ctx, target);
             set_y_rot(ctx, actual.get_yaw());
         }
     }
@@ -160,7 +116,7 @@ impl LookBehavior {
 
     pub fn on_player_rotation_move(&self, ctx: &dyn IPlayerContext, event: &mut RotationMoveEvent) {
         if let Some(target) = self.target {
-            let actual = self.processor.peek_rotation(ctx, target.rotation);
+            let actual = self.processor.peek_rotation(ctx, target);
             event.set_yaw(actual.get_yaw());
             event.set_pitch(actual.get_pitch());
         }
@@ -301,61 +257,5 @@ impl ITickableAimProcessor for AbstractAimProcessor {
             self.prev = Some(actual);
         }
         actual
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Target {
-    rotation: Rotation,
-    mode: Mode,
-}
-
-impl Target {
-    fn new(rotation: Rotation, mode: Mode) -> Self {
-        Self { rotation, mode }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
-    /// Rotation will be set client-side and is visual to the player
-    Client,
-
-    /// Rotation will be set server-side and is silent to the player
-    Server,
-
-    /// Rotation will remain unaffected on both the client and server
-    None,
-}
-
-impl Mode {
-    fn resolve(ctx: &dyn IPlayerContext, block_interact: bool) -> Mode {
-        let settings = settings();
-        let anti_cheat = settings.anti_cheat_compatibility;
-        let block_free_look = settings.block_free_look;
-
-        if ctx.player().fall_flying {
-            // always need to set angles while flying
-            return if settings.elytra_free_look {
-                Mode::Server
-            } else {
-                Mode::Client
-            };
-        } else if settings.free_look {
-            // Regardless of if antiCheatCompatibility is enabled, if a blockInteract is requested then the player
-            // rotation needs to be set somehow, otherwise Baritone will halt since objectMouseOver() will just be
-            // whatever the player is mousing over visually. Let's just settle for setting it silently.
-            if block_interact {
-                return if block_free_look {
-                    Mode::Server
-                } else {
-                    Mode::Client
-                };
-            }
-            return if anti_cheat { Mode::Server } else { Mode::None };
-        }
-
-        // all freeLook settings are disabled so set the angles
-        Mode::Client
     }
 }

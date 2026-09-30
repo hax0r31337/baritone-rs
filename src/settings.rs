@@ -359,33 +359,9 @@ pub struct Settings {
     /// Print all the debug messages to chat
     pub chat_debug: bool,
 
-    /// Move without having to force the client-sided rotations
-    pub free_look: bool,
-
-    /// Break and place blocks without having to force the client-sided rotations. Requires `#freeLook`.
-    pub block_free_look: bool,
-
-    /// Automatically elytra fly without having to force the client-sided rotations.
-    pub elytra_free_look: bool,
-
-    /// Forces the client-sided yaw rotation to an average of the last `#smoothLookTicks` of server-sided rotations.
-    pub smooth_look: bool,
-
-    /// Same as `#smoothLook` but for elytra flying.
-    pub elytra_smooth_look: bool,
-
-    /// The number of ticks to average across for `#smoothLook`;
-    pub smooth_look_ticks: i32,
-
     /// When true, the player will remain with its existing look direction as often as possible.
     /// Although, in some cases this can get it stuck, hence this setting to disable that behavior.
     pub remain_with_existing_look_direction: bool,
-
-    /// Will cause some minor behavioral differences to ensure that Baritone works on anticheats.
-    ///
-    /// At the moment this will silently set the player's rotations when using freeLook so you're not sprinting in
-    /// directions other than forward, which is picken up by more "advanced" anticheats like AAC, but not NCP.
-    pub anti_cheat_compatibility: bool,
 
     /// Exclusively use cached chunks for pathing
     ///
@@ -680,14 +656,7 @@ impl Default for Settings {
             slow_path_timeout_ms: 40000,
             backfill: false,
             chat_debug: false,
-            free_look: true,
-            block_free_look: false,
-            elytra_free_look: true,
-            smooth_look: false,
-            elytra_smooth_look: false,
-            smooth_look_ticks: 5,
             remain_with_existing_look_direction: true,
-            anti_cheat_compatibility: true,
             path_through_cached_only: false,
             sprint_in_water: true,
             blacklist_closest_on_failure: true,
@@ -813,7 +782,6 @@ mod tests {
         "allowWalkOnBottomSlab",
         "allowWalkOnMagmaBlocks",
         "allowWaterBucketFall",
-        "antiCheatCompatibility",
         "assumeExternalAutoTool",
         "assumeSafeWalk",
         "assumeStep",
@@ -829,7 +797,6 @@ mod tests {
         "blacklistClosestOnFailure",
         "blockBreakAdditionalPenalty",
         "blockBreakSpeed",
-        "blockFreeLook",
         "blockPlacementPenalty",
         "blockReachDistance",
         "blocksToAvoid",
@@ -845,8 +812,6 @@ mod tests {
         "desktopNotifications",
         "disableCompletionCheck",
         "disconnectOnArrival",
-        "elytraFreeLook",
-        "elytraSmoothLook",
         "enterPortal",
         "exploreChunkSetMinimumSize",
         "exploreForBlocks",
@@ -860,7 +825,6 @@ mod tests {
         "followRadius",
         "followTargetMaxDistance",
         "forceInternalMining",
-        "freeLook",
         "internalMiningAirException",
         "inventoryMoveOnlyIfStationary",
         "itemSaver",
@@ -915,8 +879,6 @@ mod tests {
         "slowPath",
         "slowPathTimeDelayMS",
         "slowPathTimeoutMS",
-        "smoothLook",
-        "smoothLookTicks",
         "splicePath",
         "sprintAscends",
         "sprintInWater",

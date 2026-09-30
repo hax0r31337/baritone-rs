@@ -339,7 +339,7 @@ impl IBaritoneProcess for FarmProcess {
             if let Some(rot) = rot
                 && is_safe_to_cancel
             {
-                baritone.look_behavior.update_target(ctx, rot, true);
+                baritone.look_behavior.update_target(rot);
                 movement_helper::switch_to_best_tool_for(
                     &mut baritone.player_context,
                     world.get_block_state(pos),
@@ -391,7 +391,7 @@ impl IBaritoneProcess for FarmProcess {
                     block_reach_distance,
                 );
                 if result.get_direction() == Direction::Up {
-                    baritone.look_behavior.update_target(ctx, rot, true);
+                    baritone.look_behavior.update_target(rot);
                     if ctx.is_looking_at(pos) {
                         baritone
                             .input_override_handler
@@ -434,7 +434,7 @@ impl IBaritoneProcess for FarmProcess {
                         block_reach_distance,
                     );
                     if result.get_direction() == dir {
-                        baritone.look_behavior.update_target(ctx, rot, true);
+                        baritone.look_behavior.update_target(rot);
                         if ctx.is_looking_at(pos) {
                             baritone
                                 .input_override_handler
@@ -457,7 +457,7 @@ impl IBaritoneProcess for FarmProcess {
                 && InventoryBehavior::throwaway(baritone, true, is_bone_meal)
             {
                 let ctx = &baritone.player_context;
-                baritone.look_behavior.update_target(ctx, rot, true);
+                baritone.look_behavior.update_target(rot);
                 if ctx.is_looking_at(pos) {
                     baritone
                         .input_override_handler

@@ -158,9 +158,7 @@ impl IBaritoneProcess for BackfillProcess {
                         .get_target()
                         .get_rotation()
                         .expect("NoSuchElementException: No value present");
-                    baritone
-                        .look_behavior
-                        .update_target(&baritone.player_context, rotation, true);
+                    baritone.look_behavior.update_target(rotation);
                     return Some(PathingCommand::new(None, PathingCommandType::RequestPause));
                 }
             }

@@ -210,12 +210,8 @@ impl Movement {
             current_state.set_input(Input::ClickLeft, true);
         }
 
-        // If the movement target has to force the new rotations, or we aren't using silent move, then force the rotations
         if let Some(rotation) = current_state.get_target().get_rotation() {
-            let force = current_state.get_target().has_to_force_rotations();
-            baritone
-                .look_behavior
-                .update_target(&baritone.player_context, rotation, force);
+            baritone.look_behavior.update_target(rotation);
         }
         let handler = &mut baritone.input_override_handler;
         handler.clear_all_keys();

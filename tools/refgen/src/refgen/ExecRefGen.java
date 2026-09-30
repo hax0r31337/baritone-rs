@@ -4,6 +4,7 @@ import baritone.Baritone;
 import baritone.api.BaritoneAPI;
 import baritone.api.IBaritone;
 import baritone.api.IBaritoneProvider;
+import baritone.api.Settings;
 import baritone.api.event.events.PacketEvent;
 import baritone.api.event.events.PathEvent;
 import baritone.api.event.events.PlayerUpdateEvent;
@@ -2269,6 +2270,13 @@ final class ExecRefGen {
             }
 
             BlockRefGen.apply(s.config);
+            // The port's LookBehavior only rotates server-side, which upstream resolves to
+            // Target.Mode.SERVER with freeLook, blockFreeLook and antiCheatCompatibility on (the
+            // simulated player never fall flies)
+            Settings settings = BaritoneAPI.getSettings();
+            settings.freeLook.value = true;
+            settings.blockFreeLook.value = true;
+            settings.antiCheatCompatibility.value = true;
             ExecWorld world = s.world.copy();
             Sim sim = new Sim(world, s.start, s.items, s.selected, seed);
             sim.loadRadius = s.loadRadius;

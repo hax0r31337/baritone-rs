@@ -321,8 +321,6 @@ pub struct Player {
     pub bounding_box: Aabb,
     /// `isInWall()`: the eyes are inside a suffocating block.
     pub in_wall: bool,
-    /// `isFallFlying()`
-    pub fall_flying: bool,
     /// `isSprinting()`. Baritone clears it (`setSprinting(false)`).
     pub sprinting: bool,
     /// `getAbilities().flying`. Baritone clears it while it moves.
@@ -367,7 +365,6 @@ impl Default for Player {
             crouching_eye_height: Self::CROUCHING_EYE_HEIGHT,
             bounding_box: Self::standing_box(Vec3::ZERO),
             in_wall: false,
-            fall_flying: false,
             sprinting: false,
             flying: false,
             hands_busy: false,

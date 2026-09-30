@@ -619,7 +619,7 @@ impl PathExecutor {
                 first,
                 ctx.player_rotations(),
             );
-            baritone.look_behavior.update_target(ctx, rotation, false);
+            baritone.look_behavior.update_target(rotation);
             baritone
                 .input_override_handler
                 .set_input_force_state(Input::MoveForward, true);
