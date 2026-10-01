@@ -11,6 +11,9 @@
 //! slots for every block. Costs are compared bit for bit. The block state table comes from
 //! `fixtures/reference/blocks.json.gz`.
 
+// Upstream runs on Java Edition.
+#![cfg(not(feature = "bedrock"))]
+
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io::Read;

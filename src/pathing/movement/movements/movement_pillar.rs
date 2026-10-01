@@ -7,7 +7,7 @@ use crate::api::pathing::movement::{COST_INF, MovementStatus};
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext, rotation_utils, vec_utils};
 use crate::behavior::InventoryBehavior;
-use crate::host::{Fluid, Openable, SlabType};
+use crate::host::{Openable, SlabType};
 use crate::pathing::movement::movement::MovementKind;
 use crate::pathing::movement::movement_helper as mh;
 use crate::pathing::movement::movement_state::MovementTarget;
@@ -57,11 +57,12 @@ impl MovementPillar {
             return COST_INF;
         }
         let mut src_up = None;
-        if mh::is_water(to_break) && mh::is_water(from_state) {
+        let from_fluid = context.fluid_in(x, y, z, from_state);
+        if context.fluid_in(x, y + 2, z, to_break).is_water() && from_fluid.is_water() {
             // TODO should this also be allowed if toBreakBlock is air?
             let up = context.get(x, y + 1, z);
             src_up = Some(up);
-            if mh::is_water(up) {
+            if context.fluid_in(x, y + 1, z, up).is_water() {
                 return costs.ladder_up_one_cost; // allow ascending pillars of water, but only if we're already in one
             }
         }
@@ -76,16 +77,17 @@ impl MovementPillar {
                 place_cost += 0.1; // slightly (1/200th of a second) penalize pillaring on what's currently air
             }
         }
-        if (mh::is_liquid(from_state)
+        let from_down_fluid = context.fluid_in(x, y - 1, z, from_down);
+        if (!from_fluid.is_empty()
             && !mh::can_place_against_state(&context.bsi, x, y - 1, z, from_down))
-            || (mh::is_liquid(from_down) && context.assume_walk_on_water)
+            || (!from_down_fluid.is_empty() && context.assume_walk_on_water)
         {
             // otherwise, if we're standing in water, we cannot pillar
             // if we're standing on water and assumeWalkOnWater is true, we cannot pillar
             // if we're standing on water and assumeWalkOnWater is false, we must have ascended to here, or sneak backplaced, so it is possible to pillar again
             return COST_INF;
         }
-        if (from.lily_pad || from.carpet) && from_down.fluid != Fluid::Empty {
+        if (from.lily_pad || from.carpet) && !from_down_fluid.is_empty() {
             // to ascend here we'd have to break the block we are standing on
             return COST_INF;
         }
@@ -141,7 +143,7 @@ impl MovementPillar {
         }
 
         let from_down = BlockStateInterface::get(ctx, src);
-        if mh::is_water(from_down) && mh::is_water_ctx(ctx, dest) {
+        if mh::is_water_ctx(ctx, src) && mh::is_water_ctx(ctx, dest) {
             // stay centered while swimming up a water column
             state.set_target(MovementTarget::new(
                 rotation_utils::calc_rotation_from_vec3d(

@@ -28,8 +28,15 @@ pub struct InventoryBehavior {
 }
 
 /// `stack.getItem().components().has(DataComponents.TOOL)`
+#[cfg(not(feature = "bedrock"))]
 fn has_tool(stack: &ItemStack) -> bool {
     !stack.is_empty() && stack.tool.is_some()
+}
+
+/// `stack.getItem().components().has(DataComponents.TOOL)`: Bedrock's tools and shears.
+#[cfg(feature = "bedrock")]
+fn has_tool(stack: &ItemStack) -> bool {
+    !stack.is_empty() && crate::host::bedrock_tool::is_tool(stack)
 }
 
 impl InventoryBehavior {

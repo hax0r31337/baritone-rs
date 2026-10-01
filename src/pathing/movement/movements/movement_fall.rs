@@ -8,7 +8,7 @@ use crate::Baritone;
 use crate::api::pathing::movement::{COST_INF, MovementStatus};
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext, Rotation, rotation_utils, vec_utils};
-use crate::host::{Climbable, Fluid, Inventory};
+use crate::host::{Climbable, Inventory};
 use crate::mc::{Direction, Vec3};
 use crate::pathing::movement::calculation_context::STACK_BUCKET_WATER;
 use crate::pathing::movement::movement::MovementKind;
@@ -100,7 +100,6 @@ impl MovementFall {
             ctx.player_rotations(),
         );
         let mut target_rotation = None;
-        let dest_state = ctx.world().get_block_state(dest);
 
         if is_magma(ctx.world().get_block_state(dest.below()))
             && mh::stepping_on_blocks(ctx)
@@ -111,7 +110,7 @@ impl MovementFall {
         }
 
         // WaterFluid: still or flowing water
-        let is_water = dest_state.fluid == Fluid::Water;
+        let is_water = ctx.world().get_fluid_state(dest).is_water();
         if !is_water && will_place_bucket() && player_feet != dest {
             let water_bucket = ctx
                 .player()

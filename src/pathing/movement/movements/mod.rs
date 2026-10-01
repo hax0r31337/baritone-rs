@@ -20,7 +20,7 @@ pub use movement_parkour::MovementParkour;
 pub use movement_pillar::MovementPillar;
 pub use movement_traverse::MovementTraverse;
 
-use crate::host::{BlockState, Climbable, Fluid, SpeedKind};
+use crate::host::{BlockState, Climbable, SpeedKind};
 
 // Block identity checks (`state.getBlock() == Blocks.X`, `state.is(Blocks.X)`) that several
 // movements share; docs/trait-mapping.md lists them.
@@ -40,7 +40,7 @@ pub(crate) fn is_magma(state: &BlockState) -> bool {
 /// `Blocks.WATER`: a pure water block, not waterlogged.
 #[inline]
 pub(crate) fn is_water_block(state: &BlockState) -> bool {
-    state.liquid_block && state.fluid == Fluid::Water
+    state.liquid_block && state.own_fluid().is_water()
 }
 
 /// `Blocks.LADDER || Blocks.VINE` (not the nether vines)

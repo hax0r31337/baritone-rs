@@ -174,21 +174,23 @@ impl MovementDiagonal {
         }
         let cutting_over1 = context.get(x, y - 1, dest_z);
         if (!context.allow_walk_on_magma_blocks && is_magma(cutting_over1))
-            || mh::is_lava(cutting_over1)
+            || context.fluid_in(x, y - 1, dest_z, cutting_over1).is_lava()
         {
             return;
         }
         let cutting_over2 = context.get(dest_x, y - 1, z);
         // upstream tests cuttingOver1 for magma again here; kept
         if (!context.allow_walk_on_magma_blocks && is_magma(cutting_over1))
-            || mh::is_lava(cutting_over2)
+            || context.fluid_in(dest_x, y - 1, z, cutting_over2).is_lava()
         {
             return;
         }
         let mut water = false;
         let start_state = context.get(x, y, z);
         let start_in = start_state;
-        if mh::is_water(start_state) || mh::is_water(dest_into) {
+        if context.fluid_in(x, y, z, start_state).is_water()
+            || context.fluid_in(dest_x, y, dest_z, dest_into).is_water()
+        {
             if ascend {
                 return;
             }
@@ -199,7 +201,9 @@ impl MovementDiagonal {
             water = true;
         }
         let pb0 = context.get(x, y, dest_z);
+        let pb0_fluid = context.fluid_in(x, y, dest_z, pb0);
         let pb2 = context.get(dest_x, y, z);
+        let pb2_fluid = context.fluid_in(dest_x, y, z, pb2);
         if ascend {
             let a_top = mh::can_walk_through(context, x, y + 2, dest_z);
             let a_mid = mh::can_walk_through(context, x, y + 1, dest_z);
@@ -208,8 +212,8 @@ impl MovementDiagonal {
             let b_mid = mh::can_walk_through(context, dest_x, y + 1, z);
             let b_low = mh::can_walk_through_state(context, dest_x, y, z, pb2);
             if (!(a_top && a_mid && a_low) && !(b_top && b_mid && b_low)) // no option
-                || mh::avoid_walking_into(pb0) // bad
-                || mh::avoid_walking_into(pb2) // bad
+                || mh::avoid_walking_into(pb0, pb0_fluid) // bad
+                || mh::avoid_walking_into(pb2, pb2_fluid) // bad
                 || (a_top && a_mid && mh::can_walk_on_state(context, x, y, dest_z, pb0)) // we could just ascend
                 || (b_top && b_mid && mh::can_walk_on_state(context, dest_x, y, z, pb2)) // we could just ascend
                 || (!a_top && a_mid && a_low) // head bonk A
@@ -239,8 +243,8 @@ impl MovementDiagonal {
         }
         let pb3 = context.get(dest_x, y + 1, z);
         if option_a == 0.0
-            && ((mh::avoid_walking_into(pb2) && !is_water_block(pb2))
-                || mh::avoid_walking_into(pb3))
+            && ((mh::avoid_walking_into(pb2, pb2_fluid) && !is_water_block(pb2))
+                || mh::avoid_walking_into(pb3, context.fluid_in(dest_x, y + 1, z, pb3)))
         {
             // at this point we're done calculating optionA, so we can check if it's actually possible to edge around in that direction
             return;
@@ -251,8 +255,8 @@ impl MovementDiagonal {
             return;
         }
         if option_b == 0.0
-            && ((mh::avoid_walking_into(pb0) && !is_water_block(pb0))
-                || mh::avoid_walking_into(pb1))
+            && ((mh::avoid_walking_into(pb0, pb0_fluid) && !is_water_block(pb0))
+                || mh::avoid_walking_into(pb1, context.fluid_in(x, y + 1, dest_z, pb1)))
         {
             // and now that option B is fully calculated, see if we can edge around that way
             return;

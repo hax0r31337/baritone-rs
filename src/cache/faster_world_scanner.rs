@@ -355,9 +355,15 @@ mod tests {
     #[test]
     fn single_value_sections() {
         let mut world = world();
+        // replaces chunk 0, 0 with one whose section 0 (index 1) is `section`
+        let set_section = |world: &mut World, section: SubChunk| {
+            let mut chunk = Chunk::new(4);
+            chunk.set_section(1, Some(section));
+            world.load_chunk(0, 0, chunk).unwrap();
+        };
         let mut section = SubChunk::from_storage(PalettedStorage::single(2));
         assert!(section.storage().is_single_value());
-        world.set_section(0, 0, 0, Some(section.clone())).unwrap();
+        set_section(&mut world, section.clone());
         let lookup = BlockOptionalMetaLookup::from_blocks(world.table(), [world.table().get(2)]);
         let feet = BetterBlockPos::new(8, 0, 8);
         let found = scan_chunk(&world, feet, &lookup, (0, 0), -1, 10);
@@ -369,7 +375,7 @@ mod tests {
 
         // a single-valued air section has only air, even for a lookup that has air
         section = SubChunk::from_storage(PalettedStorage::single(0));
-        world.set_section(0, 0, 0, Some(section)).unwrap();
+        set_section(&mut world, section);
         let air = BlockOptionalMetaLookup::from_blocks(world.table(), [world.table().get(0)]);
         assert!(scan_chunk(&world, feet, &air, (0, 0), -1, 10).is_empty());
     }

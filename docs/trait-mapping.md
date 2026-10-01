@@ -3,7 +3,7 @@
 This maps every place in the kept upstream code (baritone `25111dae`, MC 26.3) that asks about Minecraft
 block, fluid or block-state identity or API to the host trait that replaces it. Use it when porting
 upstream diffs. The traits are the fields of `crate::host::BlockState` (`src/host/block_state.rs`,
-table version 4); the field list is at the end. Item and player checks map to `crate::host::player`
+table version 5); the field list is at the end. Item and player checks map to `crate::host::player`
 (Table D); other entities are ignored, as if there were none. Locations are `File.java:line`; every file name used
 here is unique in the kept scope. `MH` = `MovementHelper.java`.
 
@@ -27,11 +27,20 @@ Identity checks that several movements share (`Blocks.SOUL_SAND`, `MAGMA_BLOCK`,
   `allowWalkOnBottomSlab=true`) and `blocksToAvoid=[]`. `movement_helper::*_block_state` apply the
   actual settings on top:
   - `can_walk_on`: `hot_floor && normal_cube && allowWalkOnMagmaBlocks` → YES;
-    `climbable ∈ {Vine, NetherVine} && allowVines` → YES; `fluid == Lava && assumeWalkOnLava` and the
-    host said NO → MAYBE; `slab == Bottom && fluid == Empty && !allowWalkOnBottomSlab` → NO.
+    `climbable ∈ {Vine, NetherVine} && allowVines` → YES; lava at the position `&& assumeWalkOnLava`
+    and the host said NO → MAYBE; `slab == Bottom &&` no fluid at the position
+    `&& !allowWalkOnBottomSlab` → NO.
   - `can_walk_through`: `!air && blocksToAvoid ∋ name` → NO. The default `blocksToAvoid` is `[tripwire]`
     (Settings.java:240).
   - `fully_passable`: no settings are involved.
+- **Fluids are read at a position.** Upstream reads `state.getFluidState()`; the port asks the world
+  for the fluid at the block's position (`World::get_fluid_state`, `BlockStateInterface::get_fluid`,
+  or `fluid_in` with the state in hand), a `FluidState`. On Java that is the state's own fluid
+  (`BlockState::own_fluid`), so nothing changes. On Bedrock a waterlogged block keeps its water in
+  the section's liquid layer, not in its state (see the Bedrock section); the tri-states then come
+  from the state's `waterlogged`, and `PrecomputedData` keeps a second entry per state for them.
+  Checks for a liquid *block* (`liquid_block`, `LiquidBlock.LEVEL`, frost walker's water) still read
+  the state's own fluid.
 - **Shapes without an entity.** The table's shapes are computed with an empty collision context. The
   client clips outline shapes with the player's (`ClipContext` with an entity), which differs for
   scaffolding while holding scaffolding (a full block) and light blocks while holding a light (visible).
@@ -152,12 +161,12 @@ Movement*/PathNode/goal classes.
 
 | Upstream | Proposed trait | Locations | What the check does |
 |---|---|---|---|
-| `LiquidBlock.LEVEL` | `liquid_block && fluid_source` (level 0 ⇔ source) | MH:104,502,522 | Source liquid next to the block → avoid breaking it; frost walker needs source water |
-| `FrostedIceBlock.meltsInto()` identity | `liquid_block && fluid == Water && fluid_source` | MH:501,521 | Frost walker target = the default water state |
-| `getFluidState().isEmpty()` | `fluid == Empty` | MH:111,174,214,224,249,373,533,610,753; MovementParkour.java:98,101; MovementPillar.java:100; MovementTraverse.java:165; CalculationContext.java:197; PathExecutor.java:323 | "Has any fluid", waterlogged included |
-| `getFluidState().getType() == Fluids.*` | `fluid` + `fluid_source` | MH:459 (`FLOWING_WATER`),720-721,737-738 | `isWater` / `isLava` (still or flowing); flowing water above |
-| `FluidType.getAmount(fs) != 8` | `fluid_amount` | MH:175,759,767 | Not full (8 means source or falling) → flowing |
-| `FluidState.isSource()` | `fluid_source` | CalculationContext.java:194,197 | `allowPlaceInFluidsSource` / `allowPlaceInFluidsFlow` |
+| `LiquidBlock.LEVEL` | `liquid_block && own_fluid().source` (level 0 ⇔ source) | MH:104,502,522 | Source liquid next to the block → avoid breaking it; frost walker needs source water |
+| `FrostedIceBlock.meltsInto()` identity | `liquid_block` and `own_fluid()` is source water | MH:501,521 | Frost walker target = the default water state |
+| `getFluidState().isEmpty()` | `FluidState::is_empty` of the fluid at the position | MH:111,174,214,224,249,373,533,610,753; MovementParkour.java:98,101; MovementPillar.java:100; MovementTraverse.java:165; CalculationContext.java:197; PathExecutor.java:323 | "Has any fluid", waterlogged included |
+| `getFluidState().getType() == Fluids.*` | `FluidState::is_water` / `is_lava` + `source` of the fluid at the position | MH:459 (`FLOWING_WATER`),720-721,737-738 | `isWater` / `isLava` (still or flowing); flowing water above |
+| `FluidType.getAmount(fs) != 8` | `FluidState::amount` (`possibly_flowing`) | MH:175,759,767 | Not full (8 means source or falling) → flowing |
+| `FluidState.isSource()` | `FluidState::source` | CalculationContext.java:194,197 | `allowPlaceInFluidsSource` / `allowPlaceInFluidsFlow` |
 | `SnowLayerBlock.LAYERS` | `snow_layers` | MH:206,317 | 3+ layers → not walk-through; exactly 1 → replaceable |
 | `SlabBlock.TYPE` | `slab: Bottom\|Top\|Double` | MH:439,536,640; MovementPillar.java:67; MovementTraverse.java:158 | Bottom-slab rules; not `DOUBLE` → cannot backplace |
 | `StairBlock.HALF`, `StairBlock.SHAPE` | `stairs.half`, `stairs.inner_corner` (new) | MH:540,543 | Waterlogged stairs are solid if top half or `INNER_LEFT`/`INNER_RIGHT` |
@@ -226,9 +235,36 @@ data driven. `tools/refgen` exports real 26.3 items (`tests/fixtures/reference/p
 | `Items.X`, `stack.getItem() == item`, `stack.is(item)` | item ids | FarmProcess.java:511-537,623-637 | Plantable seeds, bone meal, cocoa beans, pickup list |
 | `containerMenu instanceof InventoryMenu` | `!Player::container_open` | GetToBlockProcess.java:759 | Right-clicking a container opened it |
 
+## Bedrock Edition (`bedrock` feature)
+
+With the `bedrock` cargo feature the host sends Bedrock ids: block names, item ids, block and item
+tags and block state properties as Bedrock names them (BedrockData 1.26.50.5), with property values
+as their numbers (`"1"` for a true bit). The tables above still hold; what changes:
+
+| Java | Bedrock | Where |
+|---|---|---|
+| `tripwire`, `nether_portal` | `trip_wire`, `portal` | `blocksToAvoid` default; `enterPortal` |
+| `furnace` / `blast_furnace` with `lit` | also `lit_furnace`, `lit_blast_furnace` | `blocksToAvoidBreaking` default; containers GetToBlock right-clicks |
+| `beetroots`, `melon`, `sugar_cane` | `beetroot`, `melon_block`, `reeds` | Farm |
+| crop `age` (beetroot up to 3), bamboo `stage` | `growth` (beetroot up to 7), `age_bit` | Farm |
+| `ItemTags.SWORDS`, `*_TOOL_MATERIALS` | `minecraft:is_sword`, `minecraft:*_tier` (on the tools themselves, so material cost ranks tools) | ToolSet |
+| `DataComponents.TOOL` (`ItemStack::tool`, `Tool`, `ToolRule`, `BlockSet`) | none: compiled out. Right tool and speed come from item tags (`is_pickaxe`, `is_axe`, `is_shovel`, `is_hoe`, `is_sword`, `is_shears`, `*_tier`) and block tags (`is_*_item_destructible`, `*_tier_destructible`); having a tool is `is_tool` or `is_shears` | `src/host/bedrock_tool.rs` |
+| break speed `tool / hardness / (30 or 100)` | `1 / ((1.5 or 5) × hardness) × tool / 20`, the same shape in `f64` | `bedrock_tool::speed_vs_block` |
+| Haste | the stronger of Haste and Conduit Power | ToolSet |
+| waterlogging in the state (`waterlogged=true`, `fluid` in the state) | the section's liquid layer (layer 1) holds the water, the block layer the block's state: `SubChunk::from_layers`, `World::set_liquid`. The fluid at a position is the liquid layer's if it has one there, else the block's own; states that can hold water send their `waterlogged` tri-states | `src/host/world.rs`, `PrecomputedData` |
+| `ActionCosts` walk / sprint / sneak / water 4.633 / 3.564 / 15.385 / 9.091 | the same ÷ 0.98 (no input scale): 4.540 / 3.492 / 15.077 / 8.909 | `ActionCosts::bedrock` |
+| soul sand 2 × walk | 1.225³ × walk (0.544x speed) | `ActionCosts::bedrock` |
+| ladder up / down 8.511 / 6.667 | 5 / 5 (0.2 blocks a tick both ways) | `ActionCosts::bedrock` |
+| `costHeuristic` 3.563 | 3.492, under the sprint cost | `Settings` default |
+
+Falls and the jump (gravity 0.08, drag 0.98, jump 0.42, same order) and the step height a bottom slab
+needs (0.5625 ≥ 0.5) match Java, so their costs and movements are unchanged.
+
+The reference fixtures are Java's, so everything in `tests/` only runs without the feature.
+
 ## Trait fields
 
-`crate::host::BlockState`, table version 4. Serialized as JSON with these names; enum values are
+`crate::host::BlockState`, table version 5. Serialized as JSON with these names; enum values are
 snake_case (`"nether_vine"`), `Option` fields are absent or `null` when unset, and every field except
 `name` and the three tri-states defaults to false / zero / empty. "(new)" marks fields the plan's
 trait table does not list.
@@ -240,14 +276,15 @@ trait table does not list.
 | `tags` (new, v2) | `[String]`, sorted | Block tags the state is in. At least the tags item tool rules refer to (`mineable/*`, `incorrect_for_*_tool`, `sword_efficient`, `leaves`, ...) |
 | `air` | `bool` | Java `AirBlock` (air, cave air, void air) |
 | `can_walk_on`, `can_walk_through`, `fully_passable` | `Ternary` | Precomputed tri-states. MAYBE → position check in Rust. Setting overrides are listed under Caveats |
-| `fluid` | `Empty\|Water\|Lava` | Fluid in this state, waterlogged and bubble column included |
-| `fluid_source` | `bool` | `FluidState.isSource()` (the plan's "flowing" is `!fluid_source`) |
-| `fluid_amount` | `u8` | `FluidState.getAmount()`: 8 for source or falling, 1-7 for flowing (the plan's "level") |
+| `waterlogged` (new, v5) | `Option<{can_walk_on, can_walk_through, fully_passable}>` | Bedrock: the tri-states with still water in the liquid layer at the block's position. Sent for every state that can hold water; absent on Java, where waterlogging is part of the state |
+| `fluid` | `Empty\|Water\|Lava` | The fluid the state holds itself (`own_fluid()`): a liquid block's, on Java also a waterlogged or bubble column state's. Ported code reads the fluid at a position instead (Caveats) |
+| `fluid_source` | `bool` | `FluidState.isSource()` of the state's own fluid (the plan's "flowing" is `!fluid_source`) |
+| `fluid_amount` | `u8` | `FluidState.getAmount()` of the state's own fluid: 8 for source or falling, 1-7 for flowing (the plan's "level") |
 | `liquid_block` (new) | `bool` | The block itself is a pure liquid (Java `LiquidBlock`: water/lava), not waterlogged |
 | `liquid` (new) | `bool` | `BlockBehaviour.liquid()`: `liquid_block` plus bubble columns. Only `FallingBlock.isFree` reads it |
 | `climbable` | `Option<Ladder\|Vine\|NetherVine\|Scaffolding>` | `isClimbable` = Ladder\|Vine\|NetherVine. The `NetherVine` variant (weeping/twisting, both parts) is new |
 | `falls` | `bool` | Java `FallingBlock` (gravity) |
-| `avoid_walking_into` | `bool` | Cactus, sweet berry bush, fire, end portal, cobweb, bubble column. Rust ORs in `fluid != Empty` and `hot_floor && !allowWalkOnMagmaBlocks` |
+| `avoid_walking_into` | `bool` | Cactus, sweet berry bush, fire, end portal, cobweb, bubble column. Rust ORs in a fluid at the position and `hot_floor && !allowWalkOnMagmaBlocks` |
 | `hot_floor` (new) | `bool` | Hurts entities that stand on it unless they sneak (magma) |
 | `fire` (new) | `bool` | Java `BaseFireBlock` (fire, soul fire) |
 | `avoid_breaking` | `bool` | Ice (turns into water), infested blocks |

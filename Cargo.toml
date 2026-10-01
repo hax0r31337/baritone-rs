@@ -3,6 +3,11 @@ name = "baritone"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Bedrock Edition ids (blocks, items, tags, block state properties) and Bedrock's break time
+# formula, for a host that plays Bedrock. Java Edition's without it.
+bedrock = []
+
 [dependencies]
 arc-swap = "1.9.2"
 log = "0.4.34"

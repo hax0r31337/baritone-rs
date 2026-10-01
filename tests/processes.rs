@@ -4,6 +4,9 @@
 //! 26.3, so no block drops anything there), blocks upstream finds in its chunk cache (which
 //! the port does not have), and settings the processes change.
 
+// Java Edition's blocks and items: the table is the Java reference fixture's.
+#![cfg(not(feature = "bedrock"))]
+
 mod common;
 
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -20,7 +20,7 @@ use crate::api::utils::BetterBlockPos;
 use crate::mc::{Aabb, Direction, Vec3, VoxelShape, mth};
 use crate::pathing::precompute::Ternary;
 
-/// The fluid in a block state, waterlogging and bubble columns included.
+/// A kind of fluid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fluid {
@@ -30,6 +30,62 @@ pub enum Fluid {
     Water,
     /// Still or flowing lava (`Fluids.LAVA` / `Fluids.FLOWING_LAVA`).
     Lava,
+}
+
+/// The fluid at a position (Minecraft's `FluidState`), waterlogging and bubble columns
+/// included. Ask the world for it (`World::get_fluid_state`, `BlockStateInterface::get_fluid`):
+/// on Bedrock a waterlogged block keeps its water in the section's liquid layer, not in its
+/// block state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FluidState {
+    pub fluid: Fluid,
+    /// `isSource()`
+    pub source: bool,
+    /// `getAmount()`: 8 for a source or falling fluid, 1-7 for flowing, 0 for none.
+    pub amount: u8,
+}
+
+impl FluidState {
+    pub const EMPTY: FluidState = FluidState {
+        fluid: Fluid::Empty,
+        source: false,
+        amount: 0,
+    };
+
+    /// `isEmpty()`
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.fluid == Fluid::Empty
+    }
+
+    /// Still or flowing water.
+    #[inline]
+    pub fn is_water(self) -> bool {
+        self.fluid == Fluid::Water
+    }
+
+    /// Still or flowing lava.
+    #[inline]
+    pub fn is_lava(self) -> bool {
+        self.fluid == Fluid::Lava
+    }
+
+    /// `MovementHelper.possiblyFlowing`: a fluid that is not full (8 means source or falling).
+    #[inline]
+    pub fn possibly_flowing(self) -> bool {
+        !self.is_empty() && self.amount != 8
+    }
+}
+
+/// A block state's tri-states with water at its position that is not its own: Bedrock's
+/// liquid layer. Computed like [`BlockState::can_walk_on`] and the others, for the block holding
+/// still water.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Waterlogged {
+    pub can_walk_on: Ternary,
+    pub can_walk_through: Ternary,
+    pub fully_passable: Ternary,
 }
 
 /// Blocks a player can climb, and scaffolding.
@@ -110,7 +166,7 @@ pub struct BlockOffset {
 
 impl BlockOffset {
     /// The offset function `offsetType` installs, evaluated at `pos`.
-    pub fn evaluate(&self, pos: BetterBlockPos) -> Vec3 {
+    fn evaluate(&self, pos: BetterBlockPos) -> Vec3 {
         let seed = mth::get_seed(pos.x, 0, pos.z);
         let max_horizontal_offset = self.max_horizontal as f64;
         let x = mth::clamp(
@@ -168,7 +224,8 @@ pub struct BlockState {
     #[serde(skip)]
     pub default_state: u32,
     /// Block tags the state is in (`"minecraft:mineable/pickaxe"`). The host must send at least
-    /// the tags that item tool rules refer to ([`crate::host::BlockSet::Tag`]); sorted.
+    /// the tags that item tool rules refer to (`crate::host::BlockSet::Tag`), with the `bedrock`
+    /// feature the `is_*_item_destructible` and `*_tier_destructible` tags; sorted.
     #[serde(default)]
     pub tags: Vec<String>,
 
@@ -181,13 +238,21 @@ pub struct BlockState {
     pub can_walk_through: Ternary,
     /// `MovementHelper.fullyPassableBlockState`
     pub fully_passable: Ternary,
+    /// The tri-states when the section's liquid layer holds water at the block's position
+    /// (Bedrock). Send it for every state that can hold water there; `None` otherwise, and
+    /// always on Java, where waterlogging is part of the state.
+    #[serde(default)]
+    pub waterlogged: Option<Waterlogged>,
 
+    /// The fluid the state holds itself (see [`Self::own_fluid`]): a liquid block's, and on
+    /// Java a waterlogged state's.
     #[serde(default)]
     pub fluid: Fluid,
-    /// `FluidState.isSource()`
+    /// `FluidState.isSource()` of the state's own fluid.
     #[serde(default)]
     pub fluid_source: bool,
-    /// `FluidState.getAmount()`: 8 for a source or falling fluid, 1-7 for flowing, 0 for none.
+    /// `FluidState.getAmount()` of the state's own fluid: 8 for a source or falling fluid, 1-7
+    /// for flowing, 0 for none.
     #[serde(default)]
     pub fluid_amount: u8,
     /// The block itself is a liquid (Java `LiquidBlock`: water, lava), not waterlogged.
@@ -315,6 +380,7 @@ impl Default for BlockState {
             can_walk_on: Ternary::No,
             can_walk_through: Ternary::No,
             fully_passable: Ternary::No,
+            waterlogged: None,
             fluid: Fluid::Empty,
             fluid_source: false,
             fluid_amount: 0,
@@ -357,6 +423,28 @@ impl Default for BlockState {
 }
 
 impl BlockState {
+    /// The fluid the state holds itself: a liquid block's, and on Java a waterlogged state's.
+    /// Not the fluid at a position, which on Bedrock can come from the liquid layer: ask the
+    /// world for that (`World::get_fluid_state`, `BlockStateInterface::get_fluid`).
+    #[inline]
+    pub fn own_fluid(&self) -> FluidState {
+        FluidState {
+            fluid: self.fluid,
+            source: self.fluid_source,
+            amount: self.fluid_amount,
+        }
+    }
+
+    /// The tri-states to use with `fluid` at the state's position: [`Self::waterlogged`]'s when
+    /// the fluid is water that is not the state's own, `None` for the state's own tri-states.
+    #[inline]
+    pub fn waterlogged_by(&self, fluid: FluidState) -> Option<&Waterlogged> {
+        if !fluid.is_water() || !self.own_fluid().is_empty() {
+            return None;
+        }
+        self.waterlogged.as_ref()
+    }
+
     /// `getOffset(BlockPos)`: zero for blocks without an offset.
     pub fn get_offset(&self, pos: BetterBlockPos) -> Vec3 {
         match &self.offset {
@@ -424,7 +512,7 @@ impl std::error::Error for TableError {}
 
 /// All block states, indexed by host state id. Replaces `Block.BLOCK_STATE_REGISTRY`.
 ///
-/// Serialized as `{"version": 4, "air": <id>, "states": [...]}`.
+/// Serialized as `{"version": 5, "air": <id>, "states": [...]}`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "TableData")]
 pub struct BlockStateTable {
@@ -458,7 +546,7 @@ impl TryFrom<TableData> for BlockStateTable {
 
 impl BlockStateTable {
     /// Bumped whenever a field is added or changes meaning.
-    pub const VERSION: u32 = 4;
+    const VERSION: u32 = 5;
 
     /// Builds the table; `states[i]` gets id `i`. `air` is the state returned for unloaded
     /// chunks, empty sections and positions outside the world's height (`Blocks.AIR`).
@@ -653,7 +741,7 @@ mod tests {
     #[test]
     fn deserialize() {
         let json = r#"{
-            "version": 4,
+            "version": 5,
             "air": 0,
             "states": [
                 {"name": "minecraft:air", "air": true, "can_walk_on": "no",
@@ -663,7 +751,10 @@ mod tests {
                  "fluid": "water", "fluid_source": true, "fluid_amount": 8, "slab": "bottom",
                  "hardness": 2.0, "collision_shape": [[0, 0, 0, 1, 0.5, 1]],
                  "default": true, "tags": ["minecraft:mineable/axe", "minecraft:slabs"],
-                 "drops": ["minecraft:oak_slab"]}
+                 "drops": ["minecraft:oak_slab"]},
+                {"name": "minecraft:oak_fence", "can_walk_on": "no", "can_walk_through": "no",
+                 "fully_passable": "no", "waterlogged": {"can_walk_on": "maybe",
+                 "can_walk_through": "maybe", "fully_passable": "no"}}
             ]
         }"#;
         let table: BlockStateTable = serde_json::from_str(json).unwrap();
@@ -671,7 +762,15 @@ mod tests {
         assert_eq!(slab.id, 1);
         assert_eq!(slab.properties["type"], "bottom");
         assert_eq!(slab.can_walk_on, Ternary::Maybe);
-        assert_eq!(slab.fluid, Fluid::Water);
+        assert_eq!(
+            slab.own_fluid(),
+            FluidState {
+                fluid: Fluid::Water,
+                source: true,
+                amount: 8
+            }
+        );
+        assert_eq!(slab.waterlogged, None);
         assert_eq!(slab.slab, Some(SlabType::Bottom));
         assert_eq!(
             slab.collision_shape,
@@ -683,7 +782,24 @@ mod tests {
         assert_eq!(slab.drops, ["minecraft:oak_slab"]);
         assert!(!slab.bonemealable);
 
-        let wrong_version = json.replace("\"version\": 4", "\"version\": 3");
+        let fence = table.get(2);
+        let water = FluidState {
+            fluid: Fluid::Water,
+            source: true,
+            amount: 8,
+        };
+        let waterlogged = Waterlogged {
+            can_walk_on: Ternary::Maybe,
+            can_walk_through: Ternary::Maybe,
+            fully_passable: Ternary::No,
+        };
+        assert_eq!(fence.waterlogged, Some(waterlogged));
+        assert_eq!(fence.waterlogged_by(water), Some(&waterlogged));
+        assert_eq!(fence.waterlogged_by(FluidState::EMPTY), None);
+        // the slab's water is its own: its own tri-states already have it
+        assert_eq!(slab.waterlogged_by(water), None);
+
+        let wrong_version = json.replace("\"version\": 5", "\"version\": 4");
         assert!(serde_json::from_str::<BlockStateTable>(&wrong_version).is_err());
         let unknown_field = json.replace("\"air\": true", "\"air\": true, \"airy\": true");
         assert!(serde_json::from_str::<BlockStateTable>(&unknown_field).is_err());

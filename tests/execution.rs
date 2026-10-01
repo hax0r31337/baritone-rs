@@ -3,6 +3,9 @@
 //! execution does something sensible; `reference_execution.rs` checks that it does what
 //! upstream does.
 
+// Java Edition's blocks and items: the table is the Java reference fixture's.
+#![cfg(not(feature = "bedrock"))]
+
 mod common;
 
 use std::sync::{Arc, Mutex, MutexGuard};

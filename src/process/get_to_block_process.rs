@@ -121,22 +121,36 @@ fn walk_into_instead_of_adjacent(block: &str) -> bool {
     if !settings().enter_portal {
         return false;
     }
-    block == "minecraft:nether_portal"
+    block == edition!("minecraft:nether_portal", "minecraft:portal")
 }
+
+/// The containers `rightClickOnArrival` opens. Lit furnaces are their own blocks on Bedrock.
+const CONTAINERS: &[&str] = edition!(
+    &[
+        "minecraft:crafting_table",
+        "minecraft:furnace",
+        "minecraft:blast_furnace",
+        "minecraft:ender_chest",
+        "minecraft:chest",
+        "minecraft:trapped_chest",
+    ],
+    &[
+        "minecraft:crafting_table",
+        "minecraft:furnace",
+        "minecraft:lit_furnace",
+        "minecraft:blast_furnace",
+        "minecraft:lit_blast_furnace",
+        "minecraft:ender_chest",
+        "minecraft:chest",
+        "minecraft:trapped_chest",
+    ],
+);
 
 fn right_click_on_arrival(block: &str) -> bool {
     if !settings().right_click_container_on_arrival {
         return false;
     }
-    matches!(
-        block,
-        "minecraft:crafting_table"
-            | "minecraft:furnace"
-            | "minecraft:blast_furnace"
-            | "minecraft:ender_chest"
-            | "minecraft:chest"
-            | "minecraft:trapped_chest"
-    )
+    CONTAINERS.contains(&block)
 }
 
 fn block_on_top_must_be_removed(block: &str) -> bool {

@@ -1,8 +1,8 @@
 // Ported from baritone src/api/java/baritone/api/Settings.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
 // Only the settings read by kept code (plans/port.md), with upstream defaults. Block and item
-// lists hold Java registry ids ("minecraft:dirt"); they are resolved against the host block
-// table, never against Minecraft classes.
+// lists hold Java registry ids ("minecraft:dirt"), Bedrock ids with the `bedrock` feature; they
+// are resolved against the host block table, never against Minecraft classes.
 
 //! Baritone's settings.
 //!
@@ -215,6 +215,8 @@ pub struct Settings {
     /// metric gets better and better with each block, instead of slightly worse.
     ///
     /// Finding the optimal path is worth it, so it's the default.
+    ///
+    /// With the `bedrock` feature the default is 3.492, under Bedrock's lower sprint cost.
     pub cost_heuristic: f64,
 
     /// The maximum number of times it will fetch outside loaded or cached chunks before assuming that
@@ -600,14 +602,27 @@ impl Default for Settings {
                 "minecraft:netherrack".into(),
                 "minecraft:stone".into(),
             ],
-            blocks_to_avoid: vec!["minecraft:tripwire".into()],
+            blocks_to_avoid: vec![edition!("minecraft:tripwire", "minecraft:trip_wire").into()],
             blocks_to_disallow_breaking: vec![],
-            blocks_to_avoid_breaking: vec![
-                "minecraft:crafting_table".into(),
-                "minecraft:furnace".into(),
-                "minecraft:chest".into(),
-                "minecraft:trapped_chest".into(),
-            ],
+            // a lit furnace is its own block on Bedrock
+            blocks_to_avoid_breaking: edition!(
+                &[
+                    "minecraft:crafting_table",
+                    "minecraft:furnace",
+                    "minecraft:chest",
+                    "minecraft:trapped_chest",
+                ][..],
+                &[
+                    "minecraft:crafting_table",
+                    "minecraft:furnace",
+                    "minecraft:lit_furnace",
+                    "minecraft:chest",
+                    "minecraft:trapped_chest",
+                ][..],
+            )
+            .iter()
+            .map(|&block| block.to_owned())
+            .collect(),
             avoid_breaking_multiplier: 0.1,
             avoid_updating_falling_blocks: true,
             allow_vines: false,
@@ -623,7 +638,8 @@ impl Default for Settings {
             block_reach_distance: 4.5,
             block_break_speed: 6,
             random_looking: 0.01,
-            cost_heuristic: 3.563,
+            // just under the sprint cost, Bedrock's being lower (`ActionCosts::bedrock`)
+            cost_heuristic: edition!(3.563, 3.492),
             pathing_max_chunk_border_fetch: 50,
             backtrack_cost_favoring_coefficient: 0.5,
             avoidance: false,

@@ -18,7 +18,6 @@ use crate::pathing::movement::movement_state::MovementTarget;
 use crate::pathing::movement::movements::{is_ladder_or_vine, is_magma, is_soul_sand};
 use crate::pathing::movement::{CalculationContext, Movement, MovementState};
 use crate::settings::settings;
-use crate::utils::BlockStateInterface;
 use crate::utils::pathing::MutableMoveResult;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -174,14 +173,15 @@ impl MovementDescend {
                 + fall_n_blocks_cost(costs, unprotected_fall_height)
                 + front_break
                 + cost_so_far;
-            if reached_minimum && mh::is_water(onto_block) {
+            let onto_fluid = context.fluid_in(dest_x, new_y, dest_z, onto_block);
+            if reached_minimum && onto_fluid.is_water() {
                 if !mh::can_walk_through_state(context, dest_x, new_y, dest_z, onto_block) {
                     return false;
                 }
                 if context.assume_walk_on_water {
                     return false; // TODO fix
                 }
-                if mh::is_flowing(dest_x, new_y, dest_z, onto_block, &context.bsi) {
+                if mh::is_flowing(dest_x, new_y, dest_z, onto_fluid, &context.bsi) {
                     return false; // TODO flowing check required here?
                 }
                 if !mh::can_walk_on(context, dest_x, new_y - 1, dest_z) {
@@ -195,7 +195,7 @@ impl MovementDescend {
                 res.cost = tentative_cost; // TODO incorporate water swim up cost?
                 return false;
             }
-            if reached_minimum && context.allow_fall_into_lava && mh::is_lava(onto_block) {
+            if reached_minimum && context.allow_fall_into_lava && onto_fluid.is_lava() {
                 // found a fall into lava
                 res.x = dest_x;
                 res.y = new_y;
@@ -337,7 +337,7 @@ impl MovementDescend {
         }
         for y in 0..=2 {
             // we could hit any of the three blocks
-            if mh::avoid_walking_into(BlockStateInterface::get(ctx, into.above_n(y))) {
+            if mh::avoid_walking_into_ctx(ctx, into.above_n(y)) {
                 return true;
             }
         }

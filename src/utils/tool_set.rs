@@ -2,7 +2,9 @@
 //
 // Items and the player are the host's (`crate::host::player`): a tool's speed comes from its
 // tool rules, enchantment bonuses are precomputed by the host. The cache is keyed by the
-// block's default state, which is how the port identifies a `Block`.
+// block's default state, which is how the port identifies a `Block`. With the `bedrock`
+// feature, tags are Bedrock's, break speeds follow Bedrock's formula
+// (`crate::host::bedrock_tool`), and Conduit Power counts as Haste like it does on Bedrock.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -35,17 +37,29 @@ pub struct ToolSet {
 /// Used for evaluating the material cost of a tool.
 /// see [`ToolSet::get_material_cost`]
 /// Prefer tools with lower material cost (lower index in this list).
-const MATERIAL_TAGS_PRIORITY_LIST: [&str; 6] = [
-    "minecraft:wooden_tool_materials",
-    "minecraft:stone_tool_materials",
-    "minecraft:iron_tool_materials",
-    "minecraft:gold_tool_materials",
-    "minecraft:diamond_tool_materials",
-    "minecraft:netherite_tool_materials",
-];
+///
+/// Bedrock has no material tags; its tier tags, which are on the tools themselves, stand in.
+const MATERIAL_TAGS_PRIORITY_LIST: [&str; 6] = edition!(
+    [
+        "minecraft:wooden_tool_materials",
+        "minecraft:stone_tool_materials",
+        "minecraft:iron_tool_materials",
+        "minecraft:gold_tool_materials",
+        "minecraft:diamond_tool_materials",
+        "minecraft:netherite_tool_materials",
+    ],
+    [
+        "minecraft:wooden_tier",
+        "minecraft:stone_tier",
+        "minecraft:iron_tier",
+        "minecraft:golden_tier",
+        "minecraft:diamond_tier",
+        "minecraft:netherite_tier",
+    ],
+);
 
 /// `ItemTags.SWORDS`
-const SWORDS: &str = "minecraft:swords";
+const SWORDS: &str = edition!("minecraft:swords", "minecraft:is_sword");
 
 impl ToolSet {
     pub fn new(player: Arc<Player>, table: Arc<BlockStateTable>) -> Self {
@@ -83,7 +97,7 @@ impl ToolSet {
     /// i.e. we want to prefer a wooden pickaxe over a stone pickaxe, if all else is equal.
     ///
     /// Returns values from 0 up. (The tags hold the tools' repair materials, not the tools, so
-    /// a tool itself gets -1; kept as upstream.)
+    /// a tool itself gets -1; kept as upstream. Bedrock's tier tags do hold the tools.)
     fn get_material_cost(item_stack: &ItemStack) -> i32 {
         for (i, tag) in MATERIAL_TAGS_PRIORITY_LIST.iter().enumerate() {
             if item_stack.is_tag(tag) {
@@ -195,6 +209,17 @@ impl ToolSet {
     ///
     /// `item` is the item to mine it with, `state` the blockstate to be mined. Returns how long
     /// it would take in ticks.
+    #[cfg(feature = "bedrock")]
+    pub fn calculate_speed_vs_block(item: &ItemStack, state: &BlockState) -> f64 {
+        crate::host::bedrock_tool::speed_vs_block(item, state)
+    }
+
+    /// Calculates how long would it take to mine the specified block given the best tool
+    /// in this toolset is used. A negative value is returned if the specified block is unbreakable.
+    ///
+    /// `item` is the item to mine it with, `state` the blockstate to be mined. Returns how long
+    /// it would take in ticks.
+    #[cfg(not(feature = "bedrock"))]
     pub fn calculate_speed_vs_block(item: &ItemStack, state: &BlockState) -> f64 {
         // the host sends -1 where getDestroySpeed(null, null) throws
         let hardness = state.hardness;
@@ -222,8 +247,16 @@ impl ToolSet {
     /// Returns a double to scale block breaking speed.
     fn potion_amplifier(&self) -> f64 {
         let mut speed = 1.0;
-        if let Some(haste) = self.player.get_effect(Player::HASTE) {
-            speed *= 1.0 + haste.amplifier.wrapping_add(1) as f64 * 0.2;
+        #[cfg(not(feature = "bedrock"))]
+        let haste = self.player.get_effect(Player::HASTE).map(|e| e.amplifier);
+        // the stronger of Haste and Conduit Power
+        #[cfg(feature = "bedrock")]
+        let haste = [Player::HASTE, Player::CONDUIT_POWER]
+            .into_iter()
+            .filter_map(|effect| self.player.get_effect(effect).map(|e| e.amplifier))
+            .max();
+        if let Some(amplifier) = haste {
+            speed *= 1.0 + amplifier.wrapping_add(1) as f64 * 0.2;
         }
         if let Some(fatigue) = self.player.get_effect(Player::MINING_FATIGUE) {
             match fatigue.amplifier {
@@ -240,7 +273,9 @@ impl ToolSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{BlockSet, Inventory, MobEffectInstance, Tool, ToolRule};
+    #[cfg(not(feature = "bedrock"))]
+    use crate::host::{BlockSet, Tool, ToolRule};
+    use crate::host::{Inventory, MobEffectInstance};
 
     fn table() -> Arc<BlockStateTable> {
         let state =
@@ -290,6 +325,7 @@ mod tests {
         )
     }
 
+    #[cfg(not(feature = "bedrock"))]
     fn tool(tag: &str, speed: f32) -> ItemStack {
         ItemStack {
             tool: Some(Tool {
@@ -304,6 +340,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "bedrock"))]
     fn player(items: Vec<ItemStack>) -> Arc<Player> {
         Arc::new(Player {
             inventory: Inventory { items, selected: 3 },
@@ -311,6 +348,7 @@ mod tests {
         })
     }
 
+    #[cfg(not(feature = "bedrock"))]
     #[test]
     fn speed_vs_block() {
         let table = table();
@@ -346,6 +384,7 @@ mod tests {
         assert_eq!(ToolSet::calculate_speed_vs_block(&pick, table.get(3)), -1.0);
     }
 
+    #[cfg(not(feature = "bedrock"))]
     #[test]
     fn best_slot_and_cache() {
         let table = table();
@@ -384,5 +423,73 @@ mod tests {
         });
         let tools = ToolSet::new(Arc::new(p), table);
         assert_eq!(tools.potion_amplifier(), 1.0 * (1.0 + 2.0 * 0.2) * 0.0027);
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_best_slot_and_amplifier() {
+        let air = BlockState {
+            name: "minecraft:air".into(),
+            air: true,
+            ..BlockState::default()
+        };
+        let stone = BlockState {
+            name: "minecraft:stone".into(),
+            hardness: 1.5,
+            requires_tool: true,
+            tags: vec!["minecraft:is_pickaxe_item_destructible".into()],
+            ..BlockState::default()
+        };
+        let table = Arc::new(BlockStateTable::new(vec![air, stone], 0).unwrap());
+        let item = |name: &str, tags: &[&str]| ItemStack {
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..ItemStack::of(name)
+        };
+        let mut items = vec![ItemStack::empty(); 9];
+        items[1] = item(
+            "minecraft:diamond_sword",
+            &["minecraft:is_sword", "minecraft:diamond_tier"],
+        );
+        items[2] = item(
+            "minecraft:wooden_pickaxe",
+            &["minecraft:is_pickaxe", "minecraft:wooden_tier"],
+        );
+        items[5] = item(
+            "minecraft:golden_pickaxe",
+            &["minecraft:is_pickaxe", "minecraft:golden_tier"],
+        );
+        let mut p = Player {
+            inventory: Inventory { items, selected: 3 },
+            ..Player::default()
+        };
+        // the stronger of Haste and Conduit Power
+        p.effects.push(MobEffectInstance {
+            effect: Player::HASTE.into(),
+            amplifier: 0,
+        });
+        p.effects.push(MobEffectInstance {
+            effect: Player::CONDUIT_POWER.into(),
+            amplifier: 1,
+        });
+        let tools = ToolSet::new(Arc::new(p), Arc::clone(&table));
+        assert_eq!(tools.get_best_slot(table.get(1), false), 5);
+        assert_eq!(tools.potion_amplifier(), 1.0 + 2.0 * 0.2);
+        // golden tier: 12
+        assert_eq!(
+            ToolSet::calculate_speed_vs_block(
+                tools.player.get_inventory().get_item(5),
+                table.get(1)
+            ),
+            1.0 / 2.25 * 12.0 / 20.0
+        );
+        // tier tags stand in for material tags
+        assert_eq!(
+            ToolSet::get_material_cost(&tools.player.get_inventory().items[2]),
+            0
+        );
+        assert_eq!(
+            ToolSet::get_material_cost(&tools.player.get_inventory().items[5]),
+            3
+        );
     }
 }

@@ -13,7 +13,6 @@ use crate::api::pathing::movement::{COST_INF, MovementStatus};
 use crate::api::utils::helper::{log_debug, println};
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext, rotation_utils, vec_utils};
-use crate::host::Fluid;
 use crate::mc::Vec3;
 use crate::pathing::movement::movement_helper as mh;
 use crate::pathing::movement::movements::MovementDescend;
@@ -413,9 +412,7 @@ impl PathExecutor {
     /// Returns whether or not it was possible to snap to the current player feet
     pub fn snipsnapifpossible(&mut self, baritone: &mut Baritone) -> bool {
         let ctx = &baritone.player_context;
-        if !ctx.player().on_ground
-            && ctx.world().get_block_state(ctx.player_feet()).fluid == Fluid::Empty
-        {
+        if !ctx.player().on_ground && ctx.world().get_fluid_state(ctx.player_feet()).is_empty() {
             // if we're falling in the air, and not in water, don't splice
             return false;
         } else {
@@ -871,10 +868,14 @@ fn sprintable_ascend(
             }
         }
     }
-    if mh::avoid_walking_into(ctx.world().get_block_state(current.get_src().above_n(3))) {
+    let avoid_walking_into = |pos| {
+        let world = ctx.world();
+        mh::avoid_walking_into(world.get_block_state(pos), world.get_fluid_state(pos))
+    };
+    if avoid_walking_into(current.get_src().above_n(3)) {
         return false;
     }
-    !mh::avoid_walking_into(ctx.world().get_block_state(next.get_dest().above_n(2))) // codacy smh my head
+    !avoid_walking_into(next.get_dest().above_n(2)) // codacy smh my head
 }
 
 fn can_sprint_from_descend_into(

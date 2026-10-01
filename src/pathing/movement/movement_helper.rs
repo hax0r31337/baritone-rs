@@ -17,7 +17,7 @@ use crate::api::utils::input::Input;
 use crate::api::utils::rotation_utils::{self, DEG_TO_RAD_F};
 use crate::api::utils::{BetterBlockPos, IPlayerContext, Rotation, ray_trace_utils, vec_utils};
 use crate::behavior::InventoryBehavior;
-use crate::host::{BlockState, Climbable, Fluid, Half, Openable, SlabType};
+use crate::host::{BlockState, Climbable, FluidState, Half, Openable, SlabType};
 use crate::mc::{Axis, HitResultType, Vec3, mth};
 use crate::pathing::movement::movement::HORIZONTALS_BUT_ALSO_DOWN_____SO_EVERY_DIRECTION_EXCEPT_UP;
 use crate::pathing::movement::movement_state::MovementTarget;
@@ -73,13 +73,13 @@ pub fn avoid_adjacent_breaking(
             return true;
         }
         // LiquidBlock.LEVEL == 0
-        if state.fluid_source {
+        if state.own_fluid().source {
             return true; // source blocks like to flow horizontally
         }
         // everything else will prefer flowing down
         return !bsi.get0(x, y.wrapping_sub(1), z).liquid_block; // assume everything is in a static state
     }
-    state.fluid != Fluid::Empty
+    !bsi.fluid_in(x, y, z, state).is_empty()
 }
 
 /// `FallingBlock.isFree(BlockState)`, a Minecraft method: a falling block would fall into this.
@@ -127,7 +127,7 @@ pub fn can_walk_through_bsi_state(
     z: i32,
     state: &BlockState,
 ) -> bool {
-    let can_walk_through = can_walk_through_block_state(state);
+    let can_walk_through = can_walk_through_block_state(state, bsi.fluid_in(x, y, z, state));
     if can_walk_through == Ternary::Yes {
         return true;
     }
@@ -137,13 +137,16 @@ pub fn can_walk_through_bsi_state(
     can_walk_through_position(bsi, x, y, z, state)
 }
 
-pub fn can_walk_through_block_state(state: &BlockState) -> Ternary {
+/// With `fluid` at the state's position.
+pub fn can_walk_through_block_state(state: &BlockState, fluid: FluidState) -> Ternary {
     // Upstream returns YES for air first, then NO for a list of blocks, then NO for
     // blocksToAvoid. The host's tri-state has everything but blocksToAvoid.
     if !state.air && settings().blocks_to_avoid.contains(&state.name) {
         return Ternary::No;
     }
-    state.can_walk_through
+    state
+        .waterlogged_by(fluid)
+        .map_or(state.can_walk_through, |w| w.can_walk_through)
 }
 
 pub fn can_walk_through_position(
@@ -172,8 +175,9 @@ pub fn can_walk_through_position(
         return can_walk_on_bsi(bsi, x, y.wrapping_sub(1), z);
     }
 
-    if state.fluid != Fluid::Empty {
-        if is_flowing(x, y, z, state, bsi) {
+    let fluid = bsi.fluid_in(x, y, z, state);
+    if !fluid.is_empty() {
+        if is_flowing(x, y, z, fluid, bsi) {
             return false;
         }
         // Everything after this point has to be a special case as it relies on the water not being flowing, which means a special case is needed.
@@ -182,18 +186,21 @@ pub fn can_walk_through_position(
         }
 
         let up = bsi.get0(x, y.wrapping_add(1), z);
-        if up.fluid != Fluid::Empty || up.lily_pad {
+        if !bsi.fluid_in(x, y.wrapping_add(1), z, up).is_empty() || up.lily_pad {
             return false;
         }
-        return state.fluid == Fluid::Water;
+        return fluid.is_water();
     }
 
     state.pathfindable_land
 }
 
-pub fn fully_passable_block_state(state: &BlockState) -> Ternary {
+/// With `fluid` at the state's position.
+pub fn fully_passable_block_state(state: &BlockState, fluid: FluidState) -> Ternary {
     // no settings involved, the host's tri-state is upstream's
-    state.fully_passable
+    state
+        .waterlogged_by(fluid)
+        .map_or(state.fully_passable, |w| w.fully_passable)
 }
 
 /// canWalkThrough but also won't impede movement at all. so not including doors or fence gates (we'd have to right click),
@@ -222,7 +229,7 @@ pub fn fully_passable_state(
 /// `fullyPassable(IPlayerContext, BlockPos)`
 pub fn fully_passable_ctx(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -> bool {
     let state = ctx.world().get_block_state(pos);
-    let fully_passable = fully_passable_block_state(state);
+    let fully_passable = fully_passable_block_state(state, ctx.world().get_fluid_state(pos));
     if fully_passable == Ternary::Yes {
         return true;
     }
@@ -338,10 +345,25 @@ pub fn is_horizontal_block_passable(
     (facing == player_facing) == open
 }
 
-pub fn avoid_walking_into(state: &BlockState) -> bool {
-    state.fluid != Fluid::Empty
+/// With `fluid` at the state's position.
+pub fn avoid_walking_into(state: &BlockState, fluid: FluidState) -> bool {
+    !fluid.is_empty()
         || (state.hot_floor && !settings().allow_walk_on_magma_blocks)
         || state.avoid_walking_into
+}
+
+/// [`avoid_walking_into`] for the block and fluid at a position.
+pub fn avoid_walking_into_bsi(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> bool {
+    let state = bsi.get0(x, y, z);
+    avoid_walking_into(state, bsi.fluid_in(x, y, z, state))
+}
+
+/// [`avoid_walking_into`] for the block and fluid at a position in the context's world.
+pub fn avoid_walking_into_ctx(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -> bool {
+    avoid_walking_into(
+        BlockStateInterface::get(ctx, pos),
+        BlockStateInterface::get_fluid_ctx(ctx, pos),
+    )
 }
 
 /// Can I walk on this block without anything weird happening like me falling
@@ -358,7 +380,7 @@ pub fn can_walk_on_bsi_state(
     z: i32,
     state: &BlockState,
 ) -> bool {
-    let can_walk_on = can_walk_on_block_state(state);
+    let can_walk_on = can_walk_on_block_state(state, bsi.fluid_in(x, y, z, state));
     if can_walk_on == Ternary::Yes {
         return true;
     }
@@ -368,8 +390,12 @@ pub fn can_walk_on_bsi_state(
     can_walk_on_position(bsi, x, y, z, state)
 }
 
-pub fn can_walk_on_block_state(state: &BlockState) -> Ternary {
+/// With `fluid` at the state's position.
+pub fn can_walk_on_block_state(state: &BlockState, fluid: FluidState) -> Ternary {
     let settings = settings();
+    let host = state
+        .waterlogged_by(fluid)
+        .map_or(state.can_walk_on, |w| w.can_walk_on);
     // The host's tri-state has allowWalkOnMagmaBlocks, allowVines and assumeWalkOnLava off and
     // allowWalkOnBottomSlab on. Upstream's checks, in order, where these settings matter:
     //   isBlockNormalCube && (not magma || allowWalkOnMagmaBlocks) && ... -> YES
@@ -385,14 +411,14 @@ pub fn can_walk_on_block_state(state: &BlockState) -> Ternary {
         return Ternary::Yes;
     }
     //   isWater -> MAYBE, then isLava && assumeWalkOnLava -> MAYBE (the host said NO)
-    if is_lava(state) && settings.assume_walk_on_lava && state.can_walk_on == Ternary::No {
+    if fluid.is_lava() && settings.assume_walk_on_lava && host == Ternary::No {
         return Ternary::Maybe;
     }
     //   SlabBlock: !allowWalkOnBottomSlab && BOTTOM -> NO (a waterlogged slab stopped at isWater)
-    if is_bottom_slab(state) && state.fluid == Fluid::Empty && !settings.allow_walk_on_bottom_slab {
+    if is_bottom_slab(state) && fluid.is_empty() && !settings.allow_walk_on_bottom_slab {
         return Ternary::No;
     }
-    state.can_walk_on
+    host
 }
 
 pub fn can_walk_on_position(
@@ -402,26 +428,26 @@ pub fn can_walk_on_position(
     z: i32,
     state: &BlockState,
 ) -> bool {
-    if is_water(state) {
+    let fluid = bsi.fluid_in(x, y, z, state);
+    if fluid.is_water() {
         // since this is called literally millions of times per second, the benefit of not allocating millions of useless "pos.up()"
         // BlockPos s that we'd just garbage collect immediately is actually noticeable. I don't even think its a decrease in readability
         let up_state = bsi.get0(x, y.wrapping_add(1), z);
         if up_state.lily_pad || up_state.carpet {
             return true;
         }
+        let up_fluid = bsi.fluid_in(x, y.wrapping_add(1), z, up_state);
         // Fluids.FLOWING_WATER
-        if is_flowing(x, y, z, state, bsi)
-            || (up_state.fluid == Fluid::Water && !up_state.fluid_source)
-        {
+        if is_flowing(x, y, z, fluid, bsi) || (up_fluid.is_water() && !up_fluid.source) {
             // the only scenario in which we can walk on flowing water is if it's under still water with jesus off
-            return is_water(up_state) && !bsi.settings().assume_walk_on_water;
+            return up_fluid.is_water() && !bsi.settings().assume_walk_on_water;
         }
         // if assumeWalkOnWater is on, we can only walk on water if there isn't water above it
         // if assumeWalkOnWater is off, we can only walk on water if there is water above it
-        return is_water(up_state) ^ bsi.settings().assume_walk_on_water;
+        return up_fluid.is_water() ^ bsi.settings().assume_walk_on_water;
     }
 
-    if is_lava(state) && !is_flowing(x, y, z, state, bsi) && bsi.settings().assume_walk_on_lava {
+    if fluid.is_lava() && !is_flowing(x, y, z, fluid, bsi) && bsi.settings().assume_walk_on_lava {
         // if we get here it means that assumeWalkOnLava must be true, so put it last
         return true;
     }
@@ -477,10 +503,13 @@ pub fn can_walk_on_bsi(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> boo
 /// `canUseFrostWalker(CalculationContext, BlockState)`
 pub fn can_use_frost_walker(context: &CalculationContext, state: &BlockState) -> bool {
     // state == FrostedIceBlock.meltsInto() (the default water state, a source) && LEVEL == 0
-    context.frost_walker != 0
-        && state.liquid_block
-        && state.fluid == Fluid::Water
-        && state.fluid_source
+    context.frost_walker != 0 && is_water_source_block(state)
+}
+
+/// `FrostedIceBlock.meltsInto()`: a water block (not waterlogged) that is a source.
+fn is_water_source_block(state: &BlockState) -> bool {
+    let fluid = state.own_fluid();
+    state.liquid_block && fluid.is_water() && fluid.source
 }
 
 /// `canUseFrostWalker(IPlayerContext, BlockPos)`: the host's `frost_walker` is the level of a
@@ -489,7 +518,7 @@ pub fn can_use_frost_walker_ctx(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -
     let has_frost_walker = ctx.player().frost_walker != 0;
     let state = BlockStateInterface::get(ctx, pos);
     // state == FrostedIceBlock.meltsInto() (the default water state, a source) && LEVEL == 0
-    has_frost_walker && state.liquid_block && state.fluid == Fluid::Water && state.fluid_source
+    has_frost_walker && is_water_source_block(state)
 }
 
 /// If movements make us stand/walk on this block, will it have a top to walk on?
@@ -503,7 +532,7 @@ pub fn must_be_solid_to_walk_on(
     if is_climbable(state) {
         return false;
     }
-    if state.fluid != Fluid::Empty {
+    if !context.fluid_in(x, y, z, state).is_empty() {
         // used for frostwalker so only includes blocks where we are still on ground when leaving them to any side
         if let Some(slab) = state.slab {
             if slab != SlabType::Bottom {
@@ -599,7 +628,7 @@ pub fn get_mining_duration_ticks_state(
     include_falling: bool,
 ) -> f64 {
     if !can_walk_through_state(context, x, y, z, state) {
-        if state.fluid != Fluid::Empty {
+        if !context.fluid_in(x, y, z, state).is_empty() {
             return COST_INF;
         }
         let mult = context.break_cost_multiplier_at(x, y, z, state);
@@ -750,51 +779,33 @@ pub fn move_towards_with_slight_rotation(
     move_towards_without_rotation(ctx, state, ideal_yaw);
 }
 
-/// Returns whether or not the specified block is
-/// water, regardless of whether or not it is flowing.
-pub fn is_water(state: &BlockState) -> bool {
-    state.fluid == Fluid::Water
-}
-
 /// Returns whether or not the block at the specified pos is
 /// water, regardless of whether or not it is flowing.
 ///
 /// `isWater(IPlayerContext, BlockPos)`
 pub fn is_water_ctx(ctx: &dyn IPlayerContext, bp: BetterBlockPos) -> bool {
-    is_water(BlockStateInterface::get(ctx, bp))
+    BlockStateInterface::get_fluid_ctx(ctx, bp).is_water()
 }
 
 /// Returns whether or not the specified pos has a liquid
 ///
 /// `isLiquid(IPlayerContext, BlockPos)`
 pub fn is_liquid_ctx(ctx: &dyn IPlayerContext, p: BetterBlockPos) -> bool {
-    is_liquid(BlockStateInterface::get(ctx, p))
+    !BlockStateInterface::get_fluid_ctx(ctx, p).is_empty()
 }
 
-pub fn is_lava(state: &BlockState) -> bool {
-    state.fluid == Fluid::Lava
-}
-
-pub fn is_liquid(block_state: &BlockState) -> bool {
-    block_state.fluid != Fluid::Empty
-}
-
-pub fn possibly_flowing(state: &BlockState) -> bool {
-    // FlowingFluid: water and lava, not the empty fluid
-    state.fluid != Fluid::Empty && state.fluid_amount != 8
-}
-
-pub fn is_flowing(x: i32, y: i32, z: i32, state: &BlockState, bsi: &BlockStateInterface) -> bool {
-    if state.fluid == Fluid::Empty {
+/// `isFlowing`, with `fluid` at `x, y, z`.
+pub fn is_flowing(x: i32, y: i32, z: i32, fluid: FluidState, bsi: &BlockStateInterface) -> bool {
+    if fluid.is_empty() {
         return false;
     }
-    if state.fluid_amount != 8 {
+    if fluid.amount != 8 {
         return true;
     }
-    possibly_flowing(bsi.get0(x.wrapping_add(1), y, z))
-        || possibly_flowing(bsi.get0(x.wrapping_sub(1), y, z))
-        || possibly_flowing(bsi.get0(x, y, z.wrapping_add(1)))
-        || possibly_flowing(bsi.get0(x, y, z.wrapping_sub(1)))
+    bsi.get_fluid(x.wrapping_add(1), y, z).possibly_flowing()
+        || bsi.get_fluid(x.wrapping_sub(1), y, z).possibly_flowing()
+        || bsi.get_fluid(x, y, z.wrapping_add(1)).possibly_flowing()
+        || bsi.get_fluid(x, y, z.wrapping_sub(1)).possibly_flowing()
 }
 
 pub fn is_block_normal_cube(state: &BlockState) -> bool {

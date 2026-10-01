@@ -7,6 +7,9 @@
 // the `age` property (`CropBlock.isMaxAge` against the crop's maximum age), and
 // `BonemealableBlock`'s checks are the `bonemealable` trait, except for bamboo, whose check
 // (the stalk's height and its top's `stage` property) is ported here. Items are item ids.
+// With the `bedrock` feature, names and properties are Bedrock's: crops grow in `growth`
+// (beetroots up to 7), bamboo's stage is `age_bit`, sent as its number like every Bedrock
+// property the port reads as an integer.
 //
 // `locations` is shared with the scan that runs on the executor. `onTick` holds it
 // throughout, so a scan started during a tick lands after it; upstream races the two. The
@@ -37,10 +40,18 @@ const FARMLAND: &str = "minecraft:farmland";
 const SOUL_SAND: &str = "minecraft:soul_sand";
 const JUNGLE_LOG: &str = "minecraft:jungle_log";
 const BAMBOO: &str = "minecraft:bamboo";
+const SUGAR_CANE: &str = edition!("minecraft:sugar_cane", "minecraft:reeds");
+const CACTUS: &str = "minecraft:cactus";
 /// `BambooStalkBlock.MAX_HEIGHT`
 const BAMBOO_MAX_HEIGHT: i32 = 16;
+/// `BambooStalkBlock.STAGE`: Bedrock's `age_bit` has the same values.
+const BAMBOO_STAGE: &str = edition!("stage", "age_bit");
 /// `BambooStalkBlock.STAGE_DONE_GROWING`
 const BAMBOO_STAGE_DONE_GROWING: i32 = 1;
+/// `CropBlock.AGE`: Bedrock crops grow in `growth`.
+const CROP_AGE: &str = edition!("age", "growth");
+/// `BeetrootBlock.MAX_AGE`: Bedrock's beetroots grow to 7 like the other crops.
+const BEETROOT_MAX_AGE: i32 = edition!(3, 7);
 
 const FARMLAND_PLANTABLE: [&str; 6] = [
     "minecraft:beetroot_seeds",
@@ -103,14 +114,14 @@ impl Harvest {
             Harvest::Wheat => "minecraft:wheat",
             Harvest::Carrots => "minecraft:carrots",
             Harvest::Potatoes => "minecraft:potatoes",
-            Harvest::Beetroot => "minecraft:beetroots",
+            Harvest::Beetroot => edition!("minecraft:beetroots", "minecraft:beetroot"),
             Harvest::Pumpkin => "minecraft:pumpkin",
-            Harvest::Melon => "minecraft:melon",
+            Harvest::Melon => edition!("minecraft:melon", "minecraft:melon_block"),
             Harvest::Netherwart => "minecraft:nether_wart",
             Harvest::Cocoa => "minecraft:cocoa",
-            Harvest::Sugarcane => "minecraft:sugar_cane",
-            Harvest::Bamboo => "minecraft:bamboo",
-            Harvest::Cactus => "minecraft:cactus",
+            Harvest::Sugarcane => SUGAR_CANE,
+            Harvest::Bamboo => BAMBOO,
+            Harvest::Cactus => CACTUS,
         }
     }
 
@@ -123,14 +134,14 @@ impl Harvest {
             true
         };
         match self {
-            Harvest::Wheat | Harvest::Carrots | Harvest::Potatoes => age(state) >= 7,
-            Harvest::Beetroot => age(state) >= 3,
+            Harvest::Wheat | Harvest::Carrots | Harvest::Potatoes => crop_age(state) >= 7,
+            Harvest::Beetroot => crop_age(state) >= BEETROOT_MAX_AGE,
             Harvest::Pumpkin | Harvest::Melon => true,
             Harvest::Netherwart => age(state) >= 3,
             Harvest::Cocoa => age(state) >= 2,
-            Harvest::Sugarcane => below_is("minecraft:sugar_cane"),
-            Harvest::Bamboo => below_is("minecraft:bamboo"),
-            Harvest::Cactus => below_is("minecraft:cactus"),
+            Harvest::Sugarcane => below_is(SUGAR_CANE),
+            Harvest::Bamboo => below_is(BAMBOO),
+            Harvest::Cactus => below_is(CACTUS),
         }
     }
 }
@@ -138,6 +149,11 @@ impl Harvest {
 /// The `age` property.
 fn age(state: &BlockState) -> i32 {
     int_property(state, "age")
+}
+
+/// A `CropBlock`'s age.
+fn crop_age(state: &BlockState) -> i32 {
+    int_property(state, CROP_AGE)
 }
 
 fn int_property(state: &BlockState, name: &str) -> i32 {
@@ -157,7 +173,8 @@ fn is_bonemealable(world: &World, pos: BetterBlockPos, state: &BlockState) -> bo
     let i = bamboo_height_above_up_to_max(world, pos);
     let j = bamboo_height_below_up_to_max(world, pos);
     i + j + 1 < BAMBOO_MAX_HEIGHT
-        && int_property(world.get_block_state(pos.above_n(i)), "stage") != BAMBOO_STAGE_DONE_GROWING
+        && int_property(world.get_block_state(pos.above_n(i)), BAMBOO_STAGE)
+            != BAMBOO_STAGE_DONE_GROWING
 }
 
 /// `BambooStalkBlock.getHeightAboveUpToMax`
@@ -553,7 +570,7 @@ mod tests {
     fn world() -> World {
         let bamboo = |stage: &str| BlockState {
             name: BAMBOO.to_owned(),
-            properties: [("stage".to_owned(), stage.to_owned())].into(),
+            properties: [(BAMBOO_STAGE.to_owned(), stage.to_owned())].into(),
             // what the host sends: the state alone, in an empty world
             bonemealable: stage == "0",
             ..BlockState::default()

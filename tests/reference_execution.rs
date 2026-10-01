@@ -16,6 +16,9 @@
 //! (`VecUtils.calculateBlockCenter`), and `RotationUtils.reachable` with the look behavior's
 //! aim processor, `playerFeet` and `pathStart`, in a world of assorted shapes.
 
+// Upstream runs on Java Edition.
+#![cfg(not(feature = "bedrock"))]
+
 mod common;
 
 use std::io::Read;

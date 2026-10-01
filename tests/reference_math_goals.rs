@@ -2,6 +2,9 @@
 //! real upstream classes running against the real Minecraft client. Floating point values are
 //! compared bit for bit (any NaN matches any NaN).
 
+// Upstream runs on Java Edition, with its costs.
+#![cfg(not(feature = "bedrock"))]
+
 use std::sync::{Arc, LazyLock};
 
 use baritone::api::pathing::goals::{

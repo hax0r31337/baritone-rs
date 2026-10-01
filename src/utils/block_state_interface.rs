@@ -15,7 +15,7 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
-use crate::host::{BlockState, BlockStateTable, Chunk, SubChunk, World};
+use crate::host::{BlockState, BlockStateTable, Chunk, FluidState, SubChunk, World};
 use crate::settings::{Settings, settings, settings_snapshot};
 use crate::utils::pathing::BetterWorldBorder;
 
@@ -116,6 +116,15 @@ impl BlockStateInterface {
         Self::get(ctx, pos)
     }
 
+    /// The fluid at `pos` in the context's current world, like [`Self::get`]: empty above and
+    /// below it and in unloaded chunks.
+    pub fn get_fluid_ctx(ctx: &dyn IPlayerContext, pos: BetterBlockPos) -> FluidState {
+        if settings().path_through_cached_only {
+            return FluidState::EMPTY;
+        }
+        ctx.world().get_fluid_state(pos)
+    }
+
     /// The snapshot this reads from.
     pub fn world(&self) -> &Arc<World> {
         &self.world
@@ -203,6 +212,47 @@ impl BlockStateInterface {
             None => self.table().air(),
             Some(section) => self.table().get(section.get(x, y, z)),
         }
+    }
+
+    /// The fluid at a position (`Level.getFluidState`), where [`Self::get0`] reads blocks:
+    /// empty wherever that reads air for want of a section.
+    #[inline]
+    pub fn get_fluid(&self, x: i32, y: i32, z: i32) -> FluidState {
+        self.fluid_in(x, y, z, self.get0(x, y, z))
+    }
+
+    /// [`Self::get_fluid`] where `block` is the block state there ([`Self::get0`]'s), which
+    /// saves looking it up again. On Java that is all it reads: waterlogging is part of the
+    /// state.
+    #[inline]
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_variables))]
+    pub fn fluid_in(&self, x: i32, y: i32, z: i32, block: &BlockState) -> FluidState {
+        #[cfg(feature = "bedrock")]
+        if let Some(section) = self.section_at(x, y, z) {
+            return section.fluid_in(self.table(), x, y, z, block);
+        }
+        block.own_fluid()
+    }
+
+    /// The section [`Self::get0`] reads `x, y, z` from, `None` where it reads air for want of
+    /// one. Leaves it as the last section.
+    #[cfg(feature = "bedrock")]
+    #[inline]
+    fn section_at(&self, x: i32, y: i32, z: i32) -> Option<&SubChunk> {
+        let section_y = y.wrapping_sub(self.world.dimension().min_y) >> 4;
+        let is_last =
+            |prev: PrevSection| prev.x == x >> 4 && prev.y == section_y && prev.z == z >> 4;
+        let mut prev = self.prev_section.get();
+        if !is_last(prev) {
+            // caches the section, if there is one
+            self.get0(x, y, z);
+            prev = self.prev_section.get();
+            if !is_last(prev) {
+                return None;
+            }
+        }
+        // SAFETY: see `unsafe impl Send`; the section lives as long as `self.world`.
+        unsafe { prev.section.as_ref() }
     }
 
     pub fn is_loaded(&self, x: i32, z: i32) -> bool {
@@ -366,6 +416,66 @@ mod tests {
         // no chunk cache: upstream without world data reads air everywhere
         assert_eq!(bsi.get0(0, 0, 0).id, AIR);
         assert!(bsi.is_loaded(0, 0));
+    }
+
+    #[test]
+    fn get_fluid_matches_the_world() {
+        use crate::host::world::tests::{WATER, fluid_table};
+
+        let mut world = World::new(
+            fluid_table(),
+            DimensionType {
+                min_y: -16,
+                height: 32,
+                water_evaporates: false,
+            },
+        )
+        .unwrap();
+        world.load_chunk(0, 0, Chunk::new(2)).unwrap();
+        world.load_chunk(-1, 0, Chunk::new(2)).unwrap();
+        world.set_block(0, 0, 0, 3).unwrap();
+        world.set_block(-1, -16, 0, 4).unwrap();
+        world.set_block(3, 15, 3, 5).unwrap();
+        world.set_block(2, 0, 0, 2).unwrap();
+        #[cfg(feature = "bedrock")]
+        {
+            world.set_block(1, 0, 0, 2).unwrap();
+            world.set_liquid(1, 0, 0, 3).unwrap();
+            world.set_liquid(-2, 5, 7, 3).unwrap();
+        }
+        let world = Arc::new(world);
+        let bsi = BlockStateInterface::new(Arc::clone(&world));
+        let mut positions = Vec::new();
+        for x in -3..4 {
+            for y in [-17, -16, -1, 0, 5, 15, 16] {
+                for z in [-1, 0, 3, 7] {
+                    positions.push(BetterBlockPos::new(x, y, z));
+                }
+            }
+        }
+        // forwards and backwards, so lookups alternate between cached and new sections
+        for &pos in positions.iter().chain(positions.iter().rev()) {
+            assert_eq!(
+                bsi.get_fluid(pos.x, pos.y, pos.z),
+                world.get_fluid_state(pos),
+                "{pos:?}"
+            );
+        }
+        assert_eq!(bsi.get_fluid(0, 0, 0), WATER);
+        assert_eq!(bsi.get_fluid(3, 15, 3), WATER);
+        assert!(bsi.get_fluid(-1, -16, 0).possibly_flowing());
+        assert!(bsi.get_fluid(2, 0, 0).is_empty());
+        #[cfg(feature = "bedrock")]
+        {
+            assert_eq!(bsi.get_fluid(1, 0, 0), WATER);
+            assert_eq!(bsi.get_fluid(-2, 5, 7), WATER);
+            // the block state stays the block's
+            assert_eq!(bsi.get0(1, 0, 0).id, 2);
+        }
+
+        let mut bsi = BlockStateInterface::new(world);
+        bsi.use_the_real_world = false;
+        assert!(bsi.get_fluid(0, 0, 0).is_empty());
     }
 
     #[test]

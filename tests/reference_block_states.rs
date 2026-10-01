@@ -7,6 +7,9 @@
 //! results of the position checks in random small worlds, each under two settings: upstream
 //! defaults (`a`) and every setting read by these checks changed (`b`).
 
+// Upstream runs on Java Edition.
+#![cfg(not(feature = "bedrock"))]
+
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io::Read;
@@ -104,23 +107,28 @@ fn b(v: bool) -> char {
     if v { '1' } else { '0' }
 }
 
-/// Keep in sync with `stateRef` in tools/refgen/src/refgen/BlockRefGen.java.
+/// Keep in sync with `stateRef` in tools/refgen/src/refgen/BlockRefGen.java. Upstream's
+/// checks read the state's fluid, which on Java is the fluid at its position.
 #[allow(clippy::type_complexity)]
 const STATE_CHECKS: &[(&str, fn(&BlockState) -> char)] = &[
-    ("canWalkOnBlockState", |s| t(mh::can_walk_on_block_state(s))),
+    ("canWalkOnBlockState", |s| {
+        t(mh::can_walk_on_block_state(s, s.own_fluid()))
+    }),
     ("canWalkThroughBlockState", |s| {
-        t(mh::can_walk_through_block_state(s))
+        t(mh::can_walk_through_block_state(s, s.own_fluid()))
     }),
     ("fullyPassableBlockState", |s| {
-        t(mh::fully_passable_block_state(s))
+        t(mh::fully_passable_block_state(s, s.own_fluid()))
     }),
     ("isBlockNormalCube", |s| b(mh::is_block_normal_cube(s))),
-    ("isWater", |s| b(mh::is_water(s))),
-    ("isLava", |s| b(mh::is_lava(s))),
-    ("isLiquid", |s| b(mh::is_liquid(s))),
-    ("possiblyFlowing", |s| b(mh::possibly_flowing(s))),
+    ("isWater", |s| b(s.own_fluid().is_water())),
+    ("isLava", |s| b(s.own_fluid().is_lava())),
+    ("isLiquid", |s| b(!s.own_fluid().is_empty())),
+    ("possiblyFlowing", |s| b(s.own_fluid().possibly_flowing())),
     ("isClimbable", |s| b(mh::is_climbable(s))),
-    ("avoidWalkingInto", |s| b(mh::avoid_walking_into(s))),
+    ("avoidWalkingInto", |s| {
+        b(mh::avoid_walking_into(s, s.own_fluid()))
+    }),
     ("isBottomSlab", |s| b(mh::is_bottom_slab(s))),
     ("isTransparent", |s| b(mh::is_transparent(s))),
     ("FallingBlock.isFree", |s| b(mh::falling_block_is_free(s))),
@@ -153,7 +161,7 @@ fn position_ref(
         b(pd.fully_passable(bsi, x, y, z, s)),
         b(mh::can_walk_on_bsi(bsi, x, y, z)),
         b(mh::can_walk_through_bsi(bsi, x, y, z)),
-        b(mh::is_flowing(x, y, z, s, bsi)),
+        b(mh::is_flowing(x, y, z, bsi.fluid_in(x, y, z, s), bsi)),
         b(mh::is_replaceable(x, y, z, s, bsi)),
         b(mh::avoid_breaking(bsi, x, y, z, s)),
         b(mh::can_place_against(bsi, x, y, z)),

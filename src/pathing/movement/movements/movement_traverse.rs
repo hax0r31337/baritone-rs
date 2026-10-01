@@ -9,7 +9,7 @@ use crate::api::pathing::movement::{COST_INF, MovementStatus};
 use crate::api::utils::helper::{log_debug, println};
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext, Rotation, rotation_utils, vec_utils};
-use crate::host::{Fluid, Openable, SlabType};
+use crate::host::{Openable, SlabType};
 use crate::mc::Vec3;
 use crate::pathing::movement::movement::{
     HORIZONTALS_BUT_ALSO_DOWN_____SO_EVERY_DIRECTION_EXCEPT_UP, MovementKind,
@@ -71,7 +71,9 @@ impl MovementTraverse {
             let mut wc = costs.walk_one_block_cost;
             let mut water = false;
             let mut sneaking = false;
-            if mh::is_water(pb0) || mh::is_water(pb1) {
+            if context.fluid_in(dest_x, y + 1, dest_z, pb0).is_water()
+                || context.fluid_in(dest_x, y, dest_z, pb1).is_water()
+            {
                 wc = context.water_walk_speed;
                 water = true;
             } else {
@@ -116,8 +118,9 @@ impl MovementTraverse {
                 return COST_INF;
             }
             if mh::is_replaceable(dest_x, y - 1, dest_z, dest_on, &context.bsi) {
-                let through_water = mh::is_water(pb0) || mh::is_water(pb1);
-                if mh::is_water(dest_on) && through_water {
+                let through_water = context.fluid_in(dest_x, y + 1, dest_z, pb0).is_water()
+                    || context.fluid_in(dest_x, y, dest_z, pb1).is_water();
+                if context.fluid_in(dest_x, y - 1, dest_z, dest_on).is_water() && through_water {
                     // this happens when assume walk on water is true and this is a traverse in water, which isn't allowed
                     return COST_INF;
                 }
@@ -163,7 +166,9 @@ impl MovementTraverse {
                     return COST_INF; // this is obviously impossible
                 }
                 let block_src = context.get_block(x, y, z);
-                if (block_src.lily_pad || block_src.carpet) && src_down.fluid != Fluid::Empty {
+                if (block_src.lily_pad || block_src.carpet)
+                    && !context.fluid_in(x, y - 1, z, src_down).is_empty()
+                {
                     return COST_INF; // we can stand on these but can't place against them
                 }
                 wc *= costs.sneak_one_block_cost / costs.walk_one_block_cost; //since we are sneak backplacing, we are sneaking lol
@@ -194,10 +199,10 @@ impl MovementTraverse {
                 return;
             }
             // and if it's fine to walk into the blocks in front
-            if mh::avoid_walking_into(pb0) {
+            if mh::avoid_walking_into_ctx(ctx, m.positions_to_break[0]) {
                 return;
             }
-            if mh::avoid_walking_into(pb1) {
+            if mh::avoid_walking_into_ctx(ctx, m.positions_to_break[1]) {
                 return;
             }
             // and we aren't already pressed up against the block
@@ -340,11 +345,12 @@ impl MovementTraverse {
             }
             let into = dest.subtract(src).offset(dest);
             let into_below = BlockStateInterface::get(ctx, into);
-            let into_above = BlockStateInterface::get(ctx, into.above());
+            let into_below_fluid = BlockStateInterface::get_fluid_ctx(ctx, into);
             if this.was_the_bridge_block_always_there
                 && (!mh::is_liquid_ctx(ctx, feet) || settings().sprint_in_water)
-                && (!mh::avoid_walking_into(into_below) || mh::is_water(into_below))
-                && !mh::avoid_walking_into(into_above)
+                && (!mh::avoid_walking_into(into_below, into_below_fluid)
+                    || into_below_fluid.is_water())
+                && !mh::avoid_walking_into_ctx(ctx, into.above())
             {
                 state.set_input(Input::Sprint, true);
             }

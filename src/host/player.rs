@@ -3,7 +3,8 @@
 //!
 //! Stands in for Minecraft's `LocalPlayer`, `Inventory` and `ItemStack` in ported code. Items
 //! carry what upstream asks of them (tool rules, tags, damage); the host computes enchantment
-//! effects, because enchantments are data driven.
+//! effects, because enchantments are data driven. With the `bedrock` feature, items have no
+//! tool rules: Bedrock derives the tool from item and block tags (`super::bedrock_tool`).
 //!
 //! The host sends the player every tick. Upstream also writes to the client's player (the
 //! selected slot, sprinting, flying, the rotation, the movement input); the port writes to its
@@ -16,6 +17,7 @@ use crate::api::utils::BetterBlockPos;
 use crate::mc::{Aabb, Vec3};
 
 /// `HolderSet<Block>`: the blocks a tool rule applies to.
+#[cfg(not(feature = "bedrock"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockSet {
@@ -25,6 +27,7 @@ pub enum BlockSet {
     Blocks(Vec<String>),
 }
 
+#[cfg(not(feature = "bedrock"))]
 impl BlockSet {
     /// `BlockState.is(HolderSet)`
     pub fn contains(&self, state: &BlockState) -> bool {
@@ -36,6 +39,7 @@ impl BlockSet {
 }
 
 /// `Tool.Rule`
+#[cfg(not(feature = "bedrock"))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRule {
@@ -47,6 +51,7 @@ pub struct ToolRule {
 }
 
 /// The `minecraft:tool` item component (`net.minecraft.world.item.component.Tool`).
+#[cfg(not(feature = "bedrock"))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tool {
@@ -54,8 +59,9 @@ pub struct Tool {
     pub default_mining_speed: f32,
 }
 
+#[cfg(not(feature = "bedrock"))]
 impl Tool {
-    pub fn get_mining_speed(&self, state: &BlockState) -> f32 {
+    fn get_mining_speed(&self, state: &BlockState) -> f32 {
         for rule in &self.rules {
             if let Some(speed) = rule.speed
                 && rule.blocks.contains(state)
@@ -66,7 +72,7 @@ impl Tool {
         self.default_mining_speed
     }
 
-    pub fn is_correct_for_drops(&self, state: &BlockState) -> bool {
+    fn is_correct_for_drops(&self, state: &BlockState) -> bool {
         for rule in &self.rules {
             if let Some(correct) = rule.correct_for_drops
                 && rule.blocks.contains(state)
@@ -90,13 +96,16 @@ pub struct ItemStack {
     /// The `minecraft:max_damage` component, 0 without.
     pub max_damage: i32,
     /// The `minecraft:tool` component.
+    #[cfg(not(feature = "bedrock"))]
     pub tool: Option<Tool>,
     /// Item tags the item is in. The host must send at least the ones ported code checks:
-    /// `minecraft:swords` and the `minecraft:*_tool_materials` tags (`ToolSet`).
+    /// `minecraft:swords` and the `minecraft:*_tool_materials` tags (`ToolSet`). With the
+    /// `bedrock` feature: the `minecraft:is_*` tool kinds (`is_pickaxe`, `is_sword`,
+    /// `is_shears`, ...) and the `minecraft:*_tier` tags.
     pub tags: Vec<String>,
     /// What the item's enchantments add to mining speed: the `MINING_EFFICIENCY` attribute
     /// effect of the first enchantment that has one, at the enchantment's level (Efficiency:
-    /// `level² + 1`). `None` without such an enchantment.
+    /// `level² + 1`, on Bedrock too). `None` without such an enchantment.
     pub mining_efficiency: Option<f32>,
     /// Enchanted with Silk Touch at a level above 0.
     pub silk_touch: bool,
@@ -122,6 +131,7 @@ impl ItemStack {
             count: 0,
             damage: 0,
             max_damage: 0,
+            #[cfg(not(feature = "bedrock"))]
             tool: None,
             tags: Vec::new(),
             mining_efficiency: None,
@@ -174,6 +184,7 @@ impl ItemStack {
     }
 
     /// `getDestroySpeed(BlockState)`: the tool component's speed, 1 without one.
+    #[cfg(not(feature = "bedrock"))]
     pub fn get_destroy_speed(&self, state: &BlockState) -> f32 {
         match &self.tool {
             Some(tool) if !self.is_empty() => tool.get_mining_speed(state),
@@ -182,11 +193,28 @@ impl ItemStack {
     }
 
     /// `isCorrectToolForDrops(BlockState)`
+    #[cfg(not(feature = "bedrock"))]
     pub fn is_correct_tool_for_drops(&self, state: &BlockState) -> bool {
         match &self.tool {
             Some(tool) if !self.is_empty() => tool.is_correct_for_drops(state),
             _ => false,
         }
+    }
+
+    /// `getDestroySpeed(BlockState)`: Bedrock's tool speed from the item's tags, before
+    /// Efficiency; 1 for anything that does not dig the block faster.
+    #[cfg(feature = "bedrock")]
+    pub fn get_destroy_speed(&self, state: &BlockState) -> f32 {
+        if self.is_empty() {
+            return 1.0;
+        }
+        super::bedrock_tool::tool_speed(self, state)
+    }
+
+    /// `isCorrectToolForDrops(BlockState)`: Bedrock's right tool, from item and block tags.
+    #[cfg(feature = "bedrock")]
+    pub fn is_correct_tool_for_drops(&self, state: &BlockState) -> bool {
+        !self.is_empty() && super::bedrock_tool::is_correct_tool(self, state)
     }
 }
 
@@ -383,6 +411,9 @@ impl Default for Player {
 impl Player {
     pub const HASTE: &str = "minecraft:haste";
     pub const MINING_FATIGUE: &str = "minecraft:mining_fatigue";
+    /// Counts as Haste when mining on Bedrock.
+    #[cfg(feature = "bedrock")]
+    pub const CONDUIT_POWER: &str = "minecraft:conduit_power";
 
     /// The player's standing eye height (`EntityDimensions.eyeHeight` of `Pose.STANDING`).
     pub const STANDING_EYE_HEIGHT: f32 = 1.62;
@@ -456,11 +487,6 @@ impl Player {
         &self.inventory
     }
 
-    /// `hasEffect(Holder<MobEffect>)`
-    pub fn has_effect(&self, effect: &str) -> bool {
-        self.get_effect(effect).is_some()
-    }
-
     /// `getEffect(Holder<MobEffect>)`
     pub fn get_effect(&self, effect: &str) -> Option<&MobEffectInstance> {
         self.effects.iter().find(|e| e.effect == effect)
@@ -471,6 +497,8 @@ impl Player {
 mod tests {
     use super::*;
 
+    // Bedrock's tool rules are tested in `bedrock_tool`
+    #[cfg(not(feature = "bedrock"))]
     fn state(name: &str, tags: &[&str]) -> BlockState {
         BlockState {
             name: name.to_owned(),
@@ -479,6 +507,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "bedrock"))]
     fn pickaxe() -> Tool {
         Tool {
             rules: vec![
@@ -497,6 +526,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "bedrock"))]
     #[test]
     fn tool_rules_first_match_wins() {
         let tool = pickaxe();
@@ -522,6 +552,7 @@ mod tests {
         assert!(!direct.contains(&state("minecraft:stone", &[])));
     }
 
+    #[cfg(not(feature = "bedrock"))]
     #[test]
     fn item_stack() {
         let empty = ItemStack::empty();

@@ -7,7 +7,6 @@ use crate::api::pathing::movement::{COST_INF, MovementStatus};
 use crate::api::utils::helper::log_debug;
 use crate::api::utils::input::Input;
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
-use crate::host::Fluid;
 use crate::mc::Direction;
 use crate::pathing::movement::movement::{
     HORIZONTALS_BUT_ALSO_DOWN_____SO_EVERY_DIRECTION_EXCEPT_UP, MovementKind,
@@ -100,7 +99,8 @@ impl MovementParkour {
             // second most common case -- we could just traverse not parkour
             return;
         }
-        if mh::avoid_walking_into(adj) && adj.fluid != Fluid::Water {
+        let adj_fluid = context.fluid_in(x + x_diff, y - 1, z + z_diff, adj);
+        if mh::avoid_walking_into(adj, adj_fluid) && !adj_fluid.is_water() {
             // magma sucks
             return;
         }
@@ -121,10 +121,10 @@ impl MovementParkour {
             return;
         }
         // we can't jump from (frozen) water with assumeWalkOnWater because we can't be sure it will be frozen
-        if context.assume_walk_on_water && standing_on.fluid != Fluid::Empty {
+        if context.assume_walk_on_water && !context.fluid_in(x, y - 1, z, standing_on).is_empty() {
             return;
         }
-        if context.get(x, y, z).fluid != Fluid::Empty {
+        if !context.get_fluid(x, y, z).is_empty() {
             return; // can't jump out of water
         }
         #[allow(clippy::if_same_then_else)] // upstream's structure
@@ -242,7 +242,7 @@ impl MovementParkour {
 
     fn check_overshoot_safety(bsi: &BlockStateInterface, x: i32, y: i32, z: i32) -> bool {
         // we're going to walk into these two blocks after the landing of the parkour anyway, so make sure they aren't avoidWalkingInto
-        !mh::avoid_walking_into(bsi.get0(x, y, z)) && !mh::avoid_walking_into(bsi.get0(x, y + 1, z))
+        !mh::avoid_walking_into_bsi(bsi, x, y, z) && !mh::avoid_walking_into_bsi(bsi, x, y + 1, z)
     }
 
     fn cost_from_jump_distance(

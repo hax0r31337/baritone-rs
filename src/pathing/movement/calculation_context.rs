@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::Baritone;
 use crate::api::pathing::movement::{ActionCosts, COST_INF, action_costs};
 use crate::api::utils::{BetterBlockPos, IPlayerContext};
-use crate::host::{BlockState, Inventory, Player, World};
+use crate::host::{BlockState, FluidState, Inventory, Player, World};
 use crate::pathing::precompute::PrecomputedData;
 use crate::utils::pathing::BetterWorldBorder;
 use crate::utils::{BlockStateInterface, ToolSet};
@@ -196,6 +196,19 @@ impl CalculationContext {
         self.get(x, y, z)
     }
 
+    /// The fluid at a position (`BlockStateInterface::get_fluid`).
+    #[inline]
+    pub fn get_fluid(&self, x: i32, y: i32, z: i32) -> FluidState {
+        self.bsi.get_fluid(x, y, z)
+    }
+
+    /// The fluid at a position, where `block` is the block state there
+    /// (`BlockStateInterface::fluid_in`).
+    #[inline]
+    pub fn fluid_in(&self, x: i32, y: i32, z: i32, block: &BlockState) -> FluidState {
+        self.bsi.fluid_in(x, y, z, block)
+    }
+
     pub fn cost_of_placing_at(&self, x: i32, y: i32, z: i32, current: &BlockState) -> f64 {
         if !self.has_throwaway {
             // only true if allowPlace is true, see constructor
@@ -208,13 +221,11 @@ impl CalculationContext {
             return COST_INF;
         }
         let settings = self.bsi.settings();
-        if !settings.allow_place_in_fluids_source && current.fluid_source {
+        let fluid = self.fluid_in(x, y, z, current);
+        if !settings.allow_place_in_fluids_source && fluid.source {
             return COST_INF;
         }
-        if !settings.allow_place_in_fluids_flow
-            && current.fluid != crate::host::Fluid::Empty
-            && !current.fluid_source
-        {
+        if !settings.allow_place_in_fluids_flow && !fluid.is_empty() && !fluid.source {
             return COST_INF;
         }
         self.place_block_cost

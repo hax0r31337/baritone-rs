@@ -1,8 +1,9 @@
 // Ported from baritone src/api/java/baritone/api/pathing/movement/ActionCosts.java @ 25111daedf1d59e6a8dfb5a3e61885cdb8d953df
 //
 // Upstream this is an interface of constants. The port makes it a runtime struct so Bedrock
-// can supply its own tuning; `ActionCosts::java()` has the upstream values, and the active
-// instance is process-global like upstream's constants (`action_costs()`).
+// can supply its own tuning; `ActionCosts::java()` has the upstream values,
+// `ActionCosts::bedrock()` the Bedrock ones (the default with the `bedrock` feature), and the
+// active instance is process-global like upstream's constants (`action_costs()`).
 
 use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
@@ -80,6 +81,47 @@ impl ActionCosts {
         }
     }
 
+    /// Bedrock Edition's values, from Bedrock's movement. Not from upstream.
+    ///
+    /// Bedrock's `moveRelative` pushes by the full move vector where Java scales it by 0.98, so
+    /// walking, sprinting, sneaking and swimming are each Java's speed / 0.98: walking settles
+    /// at 0.1 / (1 - 0.6 * 0.91) = 0.2203 blocks a tick. Soul sand inflates the speed curve's
+    /// friction by 1.225 (`SPEED_FRICTION_INFLATION`), a (1 / 1.225)^3 = 0.544x speed. A ladder
+    /// moves 0.2 blocks every tick both ways: jumping or pushing into the wall sets 0.2 upward
+    /// before the move or skips the decay after it, and a descent is floored at -0.2 before the
+    /// move. Gravity, drag and the jump's 0.42 are Java's, and in the same order, so the falls and
+    /// the jump are unchanged.
+    pub fn bedrock() -> Self {
+        const INPUT_SCALE: f64 = 0.98; // Java's, which Bedrock leaves out
+        let walk_one_block_cost = 20.0 * INPUT_SCALE / 4.317; // 4.540
+        let sprint_one_block_cost = 20.0 * INPUT_SCALE / 5.612; // 3.492
+        let walk_off_block_cost = walk_one_block_cost * 0.8; // 3.632
+        let fall_1_25_blocks_cost = Self::distance_to_ticks(1.25);
+        let fall_0_25_blocks_cost = Self::distance_to_ticks(0.25);
+        Self {
+            walk_one_block_cost,
+            walk_one_in_water_cost: 20.0 * INPUT_SCALE / 2.2, // 8.909
+            walk_one_over_soul_sand_cost: walk_one_block_cost * 1.225f64.powi(3), // 8.346
+            ladder_up_one_cost: 20.0 / 4.0,                   // 5.000
+            ladder_down_one_cost: 20.0 / 4.0,                 // 5.000
+            sneak_one_block_cost: 20.0 * INPUT_SCALE / 1.3,   // 15.077
+            sprint_one_block_cost,
+            sprint_multiplier: sprint_one_block_cost / walk_one_block_cost, // 0.769
+            walk_off_block_cost,
+            center_after_fall_cost: walk_one_block_cost - walk_off_block_cost, // 0.908
+            fall_n_blocks_cost: Self::generate_fall_n_blocks_cost(),
+            fall_1_25_blocks_cost,
+            fall_0_25_blocks_cost,
+            jump_one_block_cost: fall_1_25_blocks_cost - fall_0_25_blocks_cost,
+        }
+    }
+
+    /// The costs for the edition the crate is built for: [`Self::bedrock`] with the `bedrock`
+    /// feature, [`Self::java`] without.
+    pub fn for_edition() -> Self {
+        edition!(Self::java(), Self::bedrock())
+    }
+
     pub fn generate_fall_n_blocks_cost() -> Box<[f64]> {
         (0..FALL_N_BLOCKS_COST_LEN)
             .map(|i| Self::distance_to_ticks(i as f64))
@@ -113,12 +155,12 @@ impl ActionCosts {
 
 impl Default for ActionCosts {
     fn default() -> Self {
-        Self::java()
+        Self::for_edition()
     }
 }
 
 static ACTION_COSTS: LazyLock<ArcSwap<ActionCosts>> =
-    LazyLock::new(|| ArcSwap::from_pointee(ActionCosts::java()));
+    LazyLock::new(|| ArcSwap::from_pointee(ActionCosts::for_edition()));
 
 /// The active costs (upstream's `ActionCosts` constants).
 pub fn action_costs() -> Guard<Arc<ActionCosts>> {
@@ -142,4 +184,36 @@ pub fn with_action_costs<R>(f: impl FnOnce(&ActionCosts) -> R) -> R {
 /// Replaces the active costs. Calculations already running keep the costs they captured.
 pub fn set_action_costs(costs: ActionCosts) {
     ACTION_COSTS.store(Arc::new(costs));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ticks per block once Bedrock's ground movement settles: accelerate by `speed`, move,
+    /// then decay by 0.6 * 0.91.
+    fn bedrock_ground_ticks(speed: f64) -> f64 {
+        let mut velocity = 0.0;
+        for _ in 0..200 {
+            velocity = (velocity + speed) * 0.6 * 0.91;
+        }
+        1.0 / (velocity + speed)
+    }
+
+    #[test]
+    fn bedrock_matches_its_movement() {
+        let costs = ActionCosts::bedrock();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        assert!(close(costs.walk_one_block_cost, bedrock_ground_ticks(0.1)));
+        assert!(close(
+            costs.sprint_one_block_cost,
+            bedrock_ground_ticks(0.13)
+        ));
+        // Java's own costs follow the same curve with the 0.98 input scale
+        let java = ActionCosts::java();
+        assert!(close(java.walk_one_block_cost, bedrock_ground_ticks(0.098)));
+        // the fall and jump model is shared
+        assert_eq!(costs.fall_n_blocks_cost, java.fall_n_blocks_cost);
+        assert_eq!(costs.jump_one_block_cost, java.jump_one_block_cost);
+    }
 }

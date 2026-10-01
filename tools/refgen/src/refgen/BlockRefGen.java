@@ -412,7 +412,7 @@ final class BlockRefGen {
             out.add(t);
         }
         JsonObject table = new JsonObject();
-        table.addProperty("version", 4);
+        table.addProperty("version", 5);
         table.addProperty("air", Block.BLOCK_STATE_REGISTRY.getId(Blocks.AIR.defaultBlockState()));
         table.add("states", out);
         return table;
